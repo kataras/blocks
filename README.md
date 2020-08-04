@@ -41,7 +41,7 @@ After the initialization and engine's customizations the user SHOULD call its [L
 err := views.Load()
 ```
 
-There are several methods to customize the engine, **before `Load`**, including `Delims`,  `Option`, `Funcs`, `Extension`, `Funcs`, `LayoutDir`, `DefaultLayout` and `Extensions`. You can learn more about those in our [godocs](https://pkg.go.dev/github.com/kataras/blocks?tab=Blocks).
+There are several methods to customize the engine, **before `Load`**, including `Delims`, `Option`, `Funcs`, `Extension`, `Assets`, `LayoutDir`, `DefaultLayout` and `Extensions`. You can learn more about those in our [godocs](https://pkg.go.dev/github.com/kataras/blocks?tab=Blocks).
 
 To render a template through a compatible [io.Writer](https://golang.org/pkg/io/#Writer) use the [ExecuteTemplate(w io.Writer, tmplName, layoutName string, data interface{})](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.ExecuteTemplate) method.
 
