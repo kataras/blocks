@@ -60,9 +60,9 @@ type Blocks struct {
 	mu         sync.RWMutex
 	bufferPool *bytebufferpool.Pool
 
-	// Root and Templates can be used after `Load`.
-	Root      *template.Template
-	Templates map[string]*template.Template
+	// Root, Templates and Layouts can be accessed after `Load`.
+	Root               *template.Template
+	Templates, Layouts map[string]*template.Template
 }
 
 // New returns a fresh Blocks engine instance.
@@ -102,6 +102,7 @@ func New(rootDir string) *Blocks {
 		Root: template.Must(template.New("root").
 			Parse(`{{ define "root" }} {{ template "content" . }} {{ end }}`)),
 		Templates:  make(map[string]*template.Template),
+		Layouts:    make(map[string]*template.Template),
 		reload:     false,
 		bufferPool: new(bytebufferpool.Pool),
 	}
@@ -426,7 +427,9 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 		str := string(contents)
 
 		for _, tmpl := range v.Templates {
-			_, err = tmpl.New(name).Funcs(v.layoutFuncs).Parse(str)
+			mu.Lock()
+			v.Layouts[name], err = tmpl.New(name).Funcs(v.layoutFuncs).Parse(str)
+			mu.Unlock()
 			if err != nil {
 				return err
 			}

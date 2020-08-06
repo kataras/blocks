@@ -2,11 +2,18 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/kataras/blocks"
 )
 
-var views = blocks.New("./views")
+var views = blocks.New("./views").
+	Reload(true).
+	Funcs(map[string]interface{}{
+		"year": func() int {
+			return time.Now().Year()
+		},
+	})
 
 func main() {
 	err := views.Load()
