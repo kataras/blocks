@@ -26,7 +26,7 @@ Create a folder named **./views** and put some HTML template files.
 ```
 │   main.go
 └───views
-	|   index.html
+    |   index.html
     ├───layouts
     │       main.html
     ├───partials
