@@ -2,16 +2,28 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/kataras/blocks"
 )
 
-// $ go get -u github.com/go-bindata/go-bindata/v3/go-bindata
-// $ go-bindata -prefix "../basic" ../basic/views/...
+// $ go get -u github.com/go-bindata/go-bindata
+// # OR: go get -u github.com/go-bindata/go-bindata/v3/go-bindata
+// # to save it to your go.mod file
+//
+// $ go-bindata -fs -prefix "../basic/views" ../basic/views/...
 // $ go run .
-// # OR go-bindata -prefix "../basic/views" ../basic/views/... with blocks.New("").Assets(...)
+// # OR: go-bindata -fs -prefix "../basic" ../basic/views/...
+// # with blocks.New(AssetFile()).RootDir("/views")
+//
 // System files are not used, you can optionally delete the folder and run the example now.
-var views = blocks.New("./views").Assets(Asset, AssetNames)
+var views = blocks.New(AssetFile()).
+	Reload(true).
+	Funcs(map[string]interface{}{
+		"year": func() int {
+			return time.Now().Year()
+		},
+	})
 
 func main() {
 	err := views.Load()

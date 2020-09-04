@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -17,14 +16,8 @@ import (
 	"github.com/valyala/bytebufferpool"
 )
 
-type (
-	// AssetFunc type declaration for reading content based on a name.
-	AssetFunc func(string) ([]byte, error) // key = full pathname, value = a func which should return its contents.
-	// AssetNamesFunc type declaration for returning all filenames (no dirs).
-	AssetNamesFunc func() []string
-	// ExtensionParser type declaration to customize other extension's parsers before passed to the template's one.
-	ExtensionParser func([]byte) ([]byte, error)
-)
+// ExtensionParser type declaration to customize other extension's parsers before passed to the template's one.
+type ExtensionParser func([]byte) ([]byte, error)
 
 // ErrNotExist reports whether a template was not found in the parsed templates tree.
 type ErrNotExist struct {
@@ -41,15 +34,16 @@ func (e ErrNotExist) Error() string {
 // to parse and render templates.
 // See `New` to initialize a new one.
 type Blocks struct {
-	dir               string // ./views
-	layoutDir         string // ./views/layouts
+	// the file system to load templates from.
+	// The "rootDir" field can be used to select a specific directory from this file system.
+	fs http.FileSystem
+
+	rootDir           string // /
+	layoutDir         string // /layouts
 	layoutFuncs       template.FuncMap
 	defaultLayoutName string // the default layout if it's missing from the `ExecuteTemplate`.
 	extension         string // .html
 	left, right       string // delims.
-
-	asset      AssetFunc
-	assetNames AssetNamesFunc
 
 	// extensionHandler can handle other file extensions rathen than the main one,
 	// The default contains an entry of ".md" for `blackfriday.Run`.
@@ -66,8 +60,8 @@ type Blocks struct {
 }
 
 // New returns a fresh Blocks engine instance.
-// It loads the templates based on the given "rootDir".
-// By default the layout files should be located at "$rootDir/layouts" sub-directory,
+// It loads the templates based on the given fs FileSystem (or string).
+// By default the layout files should be located at "$rootDir/layouts" sub-directory (see `RootDir` method),
 // change this behavior can be achieved through `LayoutDir` method before `Load/LoadContext`.
 // To set a default layout name for an empty layout definition on `ExecuteTemplate/ParseTemplate`
 // use the `DefaultLayout` method.
@@ -80,17 +74,20 @@ type Blocks struct {
 // will be inherited from this engine. To add a function map to this engine
 // use its `Funcs` method.
 //
-// Use the `Assets` method to define custom
-// Asset and AssetNames functions (e.g. generated go-bindata contents).
-//
 // The default extension can be changed through the `Extension` method.
 // More extension parsers can be added through the `Extensions` method.
 // The left and right delimeters can be customized through its `Delims` method.
 // To reload templates on each request (useful for development stage) call its `Reload(true)` method.
-func New(rootDir string) *Blocks {
+//
+// Usage:
+// New("./views") or
+// New(http.Dir("./views")) or
+// New(AssetFile()) for embedded data.
+func New(fs interface{}) *Blocks {
 	v := &Blocks{
-		dir:       rootDir,
-		layoutDir: filepath.Join(rootDir, "layouts"),
+		fs:        getFS(fs),
+		rootDir:   "/",
+		layoutDir: "/layouts",
 		extension: ".html",
 		extensionHandler: map[string]ExtensionParser{
 			".md": func(b []byte) ([]byte, error) { return blackfriday.Run(b), nil },
@@ -197,12 +194,19 @@ func (v *Blocks) LayoutFuncs(funcMap template.FuncMap) *Blocks {
 	return v
 }
 
+// RootDir sets the directory to use as the root one inside the provided File System.
+func (v *Blocks) RootDir(root string) *Blocks {
+	v.rootDir = filepath.ToSlash(root)
+	v.layoutDir = path.Join(root, v.layoutDir)
+	return v
+}
+
 // LayoutDir sets a custom layouts directory,
-// always relative to the root "dir" one.
+// always relative to the "rootDir" one.
 // Layouts are recognised by their prefix names.
 // Defaults to "layouts".
 func (v *Blocks) LayoutDir(relToDirLayoutDir string) *Blocks {
-	v.layoutDir = filepath.Join(v.dir, relToDirLayoutDir)
+	v.layoutDir = path.Join(v.rootDir, filepath.ToSlash(relToDirLayoutDir))
 	return v
 }
 
@@ -236,19 +240,6 @@ func (v *Blocks) Extensions(ext string, parser ExtensionParser) *Blocks {
 	return v
 }
 
-// Assets sets the function which reads contents based on a filename
-// and a function that returns all the filenames.
-// These functions are used to parse the corresponding files into templates.
-// You do not need to set them when the given "rootDir" was a system directory.
-// It's mostly useful when the application contains embedded template files,
-// e.g. pass go-bindata's `Asset` and `AssetNames` functions
-// to load templates from go-bindata generated content.
-func (v *Blocks) Assets(asset AssetFunc, names AssetNamesFunc) *Blocks {
-	v.asset = asset
-	v.assetNames = names
-	return v
-}
-
 // Load parses the templates, including layouts,
 // through the html/template standard package into the Blocks engine.
 func (v *Blocks) Load() error {
@@ -262,39 +253,10 @@ func (v *Blocks) LoadWithContext(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	asset := v.asset
-	if asset == nil {
-		asset = ioutil.ReadFile
-	}
-
-	assetNames := v.assetNames
-	if assetNames == nil {
-		var names []string
-		err := filepath.Walk(v.dir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if info.IsDir() || !info.Mode().IsRegular() {
-				return nil
-			}
-
-			names = append(names, path)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		assetNames = func() []string {
-			return names
-		}
-	}
-
-	return v.load(ctx, asset, assetNames)
+	return v.load(ctx)
 }
 
-func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetNamesFunc) error {
+func (v *Blocks) load(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -303,11 +265,28 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 		mu      sync.RWMutex
 	)
 
+	var assetNames []string // all assets names.
+	err := walk(v.fs, v.rootDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+
+		assetNames = append(assetNames, path)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
 	// +---------------------+
 	// |   Template Assets   |
 	// +---------------------+
 	loadAsset := func(assetName string) error {
-		if dir := relDir(v.dir); dir != "" && !strings.HasPrefix(filepath.ToSlash(assetName), dir) {
+		if dir := relDir(v.rootDir); dir != "" && !strings.HasPrefix(assetName, dir) {
 			// If contains a not empty directory and the asset name does not belong there
 			// then skip it, useful on bindata assets when they
 			// may contain other files that are not templates.
@@ -315,7 +294,8 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 		}
 
 		if layoutDir := relDir(v.layoutDir); layoutDir != "" &&
-			strings.HasPrefix(filepath.ToSlash(assetName), layoutDir) {
+			strings.HasPrefix(assetName, layoutDir) {
+
 			// it's a layout template file, add it to layouts and skip,
 			// in order to add them to each template file.
 			mu.Lock()
@@ -324,10 +304,12 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 			return nil
 		}
 
-		tmplName := trimDir(assetName, v.dir)
+		tmplName := trimDir(assetName, v.rootDir)
 
 		ext := path.Ext(assetName)
 		tmplName = strings.TrimSuffix(tmplName, ext)
+		tmplName = strings.TrimPrefix(tmplName, "/")
+
 		extParser := v.extensionHandler[ext]
 		hasHandler := extParser != nil // it may exists but if it's nil then we can't use it.
 		if v.extension != "" {
@@ -336,7 +318,7 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 			}
 		}
 
-		contents, err := asset(assetName)
+		contents, err := asset(v.fs, assetName)
 		if err != nil {
 			return err
 		}
@@ -381,12 +363,11 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 	}
 
 	var (
-		err     error
 		wg      sync.WaitGroup
 		errOnce sync.Once
 	)
 
-	for _, assetName := range assetNames() {
+	for _, assetName := range assetNames {
 		wg.Add(1)
 
 		go func(assetName string) {
@@ -410,7 +391,7 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 	// |       Layouts       |
 	// +---------------------+
 	loadLayout := func(layout string) error {
-		contents, err := asset(layout)
+		contents, err := asset(v.fs, layout)
 		if err != nil {
 			return err
 		}
@@ -422,7 +403,7 @@ func (v *Blocks) load(ctx context.Context, asset AssetFunc, assetNames AssetName
 			break
 		}
 
-		name := trimDir(layout, v.layoutDir) // if we want rel-to-the-dir instead we just replace with v.Dir.
+		name := trimDir(layout, v.layoutDir) // if we want rel-to-the-dir instead we just replace with v.rootDir.
 		name = strings.TrimSuffix(name, v.extension)
 		str := string(contents)
 
@@ -567,20 +548,14 @@ func relDir(dir string) string {
 		return ""
 	}
 
-	dir = filepath.ToSlash(dir)
 	if dir == "" || dir == "/" {
 		return ""
 	}
 
-	if dir[0] == '/' {
-		return dir[1:]
-	}
-
-	return strings.TrimPrefix(dir, "./")
+	return strings.TrimPrefix(dir, ".")
 }
 
 func trimDir(s string, dir string) string {
 	dir = withSuffix(relDir(dir), "/")
-	s = filepath.ToSlash(s)
 	return strings.TrimPrefix(s, dir)
 }

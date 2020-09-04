@@ -4,6 +4,7 @@
 
 Blocks is a, simple, Go-idiomatic view engine based on [html/template](https://pkg.go.dev/html/template?tab=doc#Template), plus the following features:
 
+- Compatible with the [http.FileSystem](https://golang.org/pkg/net/http/#FileSystem) interface
 - Embedded templates through [go-bindata](https://github.com/go-bindata/go-bindata)
 - Load with optional context for cancelation
 - Reload templates on development stage
@@ -81,10 +82,14 @@ views := blocks.New("./views")
 
 The default layouts directory is `$dir/layouts`, you can change it by `blocks.New(...).LayoutDir("otherLayouts")`.
 
-To parse files that are translated as Go code, inside the executable program itself, pass the [go-bindata's generated](https://github.com/go-bindata/go-bindata) `Asset` and `AssetNames` functions to the `Assets` method:
+To parse files that are translated as Go code, inside the executable program itself, pass the [go-bindata's generated](https://github.com/go-bindata/go-bindata) latest version's `AssetFile` method to the `New` function:
+
+```sh
+$ go get -u github.com/go-bindata/go-bindata
+```
 
 ```go
-views := blocks.New("./views").Assets(Asset, AssetNames)
+views := blocks.New(AssetFile())
 ```
 
 After the initialization and engine's customizations the user SHOULD call its [Load() error](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.Load) or [LoadWithContext(context.Context) error](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.LoadWithContext) method once in order to parse the files into templates.
@@ -109,7 +114,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-There are several methods to customize the engine, **before `Load`**, including `Delims`, `Option`, `Funcs`, `Extension`, `Assets`, `LayoutDir`, `LayoutFuncs`, `DefaultLayout` and `Extensions`. You can learn more about those in our [godocs](https://pkg.go.dev/github.com/kataras/blocks?tab=Blocks).
+There are several methods to customize the engine, **before `Load`**, including `Delims`, `Option`, `Funcs`, `Extension`, `RootDir`, `LayoutDir`, `LayoutFuncs`, `DefaultLayout` and `Extensions`. You can learn more about those in our [godocs](https://pkg.go.dev/github.com/kataras/blocks?tab=Blocks).
 
 Please navigate through [_examples](_examples) directory for more.
 
