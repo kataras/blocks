@@ -110,7 +110,7 @@ func New(fs interface{}) *Blocks {
 }
 
 // Reload will turn on the `Reload` setting, for development use.
-// Parse templates on each request.
+// It forces the `ExecuteTemplate` to re-parse the templates on each incoming request.
 func (v *Blocks) Reload(b bool) *Blocks {
 	v.reload = b
 	return v
@@ -456,6 +456,10 @@ func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data 
 		}
 	}
 
+	return v.executeTemplate(w, tmplName, layoutName, data)
+}
+
+func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data interface{}) error {
 	tmpl, ok := v.Templates[tmplName]
 	if !ok {
 		return ErrNotExist{tmplName}
@@ -473,9 +477,13 @@ func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data 
 }
 
 // ParseTemplate parses a template based on its "tmplName" name and returns the result.
+// Note that, this does not reload the templates on each call if Reload was set to true.
+// To refresh the templates you have to manually call the `Load` upfront.
 func (v *Blocks) ParseTemplate(tmplName, layoutName string, data interface{}) (string, error) {
 	b := v.bufferPool.Get()
-	err := v.ExecuteTemplate(b, tmplName, layoutName, data)
+	// use the unexported method so it does not re-reload the templates on each partial one
+	// when Reload was set to true.
+	err := v.executeTemplate(b, tmplName, layoutName, data)
 	contents := b.String()
 	v.bufferPool.Put(b)
 	return contents, err
