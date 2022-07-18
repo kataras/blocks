@@ -152,6 +152,7 @@ func (v *Blocks) Delims(left, right string) *Blocks {
 //
 // missingkey: Control the behavior during execution if a map is
 // indexed with a key that is not present in the map.
+//
 //	"missingkey=default" or "missingkey=invalid"
 //		The default behavior: Do nothing and continue execution.
 //		If printed, the result of the index operation is the string
@@ -160,7 +161,6 @@ func (v *Blocks) Delims(left, right string) *Blocks {
 //		The operation returns the zero value for the map type's element.
 //	"missingkey=error"
 //		Execution stops immediately with an error.
-//
 func (v *Blocks) Option(opt ...string) *Blocks {
 	v.Root.Option(opt...)
 	return v
@@ -505,11 +505,13 @@ func (v *Blocks) PartialFunc(partialName string, data interface{}) (template.HTM
 // ContextKeyType is the type which `Set`
 // request's context value is using to store
 // the current Blocks engine.
-//  See `Set` and `Get`.
+//
+//	See `Set` and `Get`.
 type ContextKeyType struct{}
 
 // ContextKey is the request's context value for a blocks engine.
-//  See `Set` and `Get`.
+//
+//	See `Set` and `Get`.
 var ContextKey ContextKeyType
 
 // Set returns a handler wrapper which sets the current

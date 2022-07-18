@@ -20,24 +20,25 @@ var builtins = template.FuncMap{
 // It is used like the `database/sql.Register` function.
 //
 // Usage:
-// 	package myFuncsCollection1
-//	func init() {
-//	  blocks.Register(a_funcMap)
-//	}
 //
-// 	package myFuncsCollection2
-//	func init() {
-//	  blocks.Register(anothrer_funcMap)
-//	}
+//		package myFuncsCollection1
+//		func init() {
+//		  blocks.Register(a_funcMap)
+//		}
 //
-// 	package main
-// 	import _ "myFuncsCollection1"
-// 	import _ "myFuncsCollection2"
+//		package myFuncsCollection2
+//		func init() {
+//		  blocks.Register(anothrer_funcMap)
+//		}
 //
-// 	func main() {
-// 	  views := blocks.New("./views")
-// 	}
-//  Views contains the functions of both collections.
+//		package main
+//		import _ "myFuncsCollection1"
+//		import _ "myFuncsCollection2"
+//
+//		func main() {
+//		  views := blocks.New("./views")
+//		}
+//	 Views contains the functions of both collections.
 func Register(funcMap template.FuncMap) {
 	for name, fn := range funcMap {
 		builtins[name] = fn
