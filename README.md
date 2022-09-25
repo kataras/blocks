@@ -4,8 +4,8 @@
 
 Blocks is a, simple, Go-idiomatic view engine based on [html/template](https://pkg.go.dev/html/template?tab=doc#Template), plus the following features:
 
-- Compatible with the [http.FileSystem](https://golang.org/pkg/net/http/#FileSystem) interface
-- Embedded templates through [go-bindata](https://github.com/go-bindata/go-bindata)
+- Compatible with the [fs.FS](https://pkg.go.dev/io/fs#FS), [embed.FS](https://pkg.go.dev/embed#FS) and [http.FileSystem](https://pkg.go.dev/net/http#FileSystem) interface
+- Embedded templates through [embed.FS](https://pkg.go.dev/embed#FS) or [go-bindata](https://github.com/go-bindata/go-bindata)
 - Load with optional context for cancelation
 - Reload templates on development stage
 - Full Layouts and Blocks support

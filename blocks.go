@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -36,9 +37,9 @@ func (e ErrNotExist) Error() string {
 type Blocks struct {
 	// the file system to load templates from.
 	// The "rootDir" field can be used to select a specific directory from this file system.
-	fs http.FileSystem
+	fs fs.FS
 
-	rootDir           string // /
+	rootDir           string // it always set to "/" as the RootDir method changes the filesystem to sub one.
 	layoutDir         string // /layouts
 	layoutFuncs       template.FuncMap
 	defaultLayoutName string // the default layout if it's missing from the `ExecuteTemplate`.
@@ -82,11 +83,10 @@ type Blocks struct {
 // Usage:
 // New("./views") or
 // New(http.Dir("./views")) or
-// New(AssetFile()) for embedded data.
+// New(embeddedFS) or New(AssetFile()) for embedded data.
 func New(fs interface{}) *Blocks {
 	v := &Blocks{
 		fs:        getFS(fs),
-		rootDir:   "/",
 		layoutDir: "/layouts",
 		extension: ".html",
 		extensionHandler: map[string]ExtensionParser{
@@ -196,8 +196,17 @@ func (v *Blocks) LayoutFuncs(funcMap template.FuncMap) *Blocks {
 
 // RootDir sets the directory to use as the root one inside the provided File System.
 func (v *Blocks) RootDir(root string) *Blocks {
-	v.rootDir = filepath.ToSlash(root)
-	v.layoutDir = path.Join(root, v.layoutDir)
+	if v.fs != nil && root != "" && root != "/" && root != "." {
+		sub, err := fs.Sub(v.fs, root)
+		if err != nil {
+			panic(err)
+		}
+
+		v.fs = sub
+	}
+
+	// v.rootDir = filepath.ToSlash(root)
+	// v.layoutDir = path.Join(root, v.layoutDir)
 	return v
 }
 
@@ -206,7 +215,7 @@ func (v *Blocks) RootDir(root string) *Blocks {
 // Layouts are recognised by their prefix names.
 // Defaults to "layouts".
 func (v *Blocks) LayoutDir(relToDirLayoutDir string) *Blocks {
-	v.layoutDir = path.Join(v.rootDir, filepath.ToSlash(relToDirLayoutDir))
+	v.layoutDir = filepath.ToSlash(relToDirLayoutDir)
 	return v
 }
 
@@ -266,7 +275,7 @@ func (v *Blocks) load(ctx context.Context) error {
 	)
 
 	var assetNames []string // all assets names.
-	err := walk(v.fs, v.rootDir, func(path string, info os.FileInfo, err error) error {
+	err := walk(v.fs, "", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -282,6 +291,10 @@ func (v *Blocks) load(ctx context.Context) error {
 		return err
 	}
 
+	if len(assetNames) == 0 {
+		return fmt.Errorf("no templates found")
+	}
+
 	// +---------------------+
 	// |   Template Assets   |
 	// +---------------------+
@@ -295,10 +308,10 @@ func (v *Blocks) load(ctx context.Context) error {
 
 		if layoutDir := relDir(v.layoutDir); layoutDir != "" &&
 			strings.HasPrefix(assetName, layoutDir) {
-
 			// it's a layout template file, add it to layouts and skip,
 			// in order to add them to each template file.
 			mu.Lock()
+
 			layouts = append(layouts, assetName)
 			mu.Unlock()
 			return nil
@@ -566,7 +579,7 @@ func relDir(dir string) string {
 		return ""
 	}
 
-	return strings.TrimPrefix(dir, ".")
+	return strings.TrimPrefix(strings.TrimPrefix(dir, "."), "/")
 }
 
 func trimDir(s string, dir string) string {

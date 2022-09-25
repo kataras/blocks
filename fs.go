@@ -2,93 +2,111 @@ package blocks
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"net/http"
-	"path"
+	"os"
 	"path/filepath"
-	"sort"
 )
 
-func getFS(fsOrDir interface{}) (fs http.FileSystem) {
+func getFS(fsOrDir interface{}) fs.FS {
 	switch v := fsOrDir.(type) {
 	case string:
-		fs = http.Dir(v)
-	case http.FileSystem:
-		fs = v
+		return os.DirFS(v)
+	case http.FileSystem: // handles go-bindata.
+		return &httpFS{v}
+	case fs.FS:
+		return v
 	default:
-		panic(fmt.Errorf(`blocks: unexpected "fileSystem" argument type of %T (string or http.FileSystem)`, v))
+		panic(fmt.Errorf(`blocks: unexpected "fsOrDir" argument type of %T (string or fs.FS or embed.FS or http.FileSystem)`, v))
 	}
-
-	return
 }
 
-// walk recursively in "fs" descends "root" path, calling "walkFn".
-func walk(fs http.FileSystem, root string, walkFn filepath.WalkFunc) error {
-	names, err := assetNames(fs, root)
-	if err != nil {
-		return fmt.Errorf("%s: %w", root, err)
+// walk recursively in "fileSystem" descends "root" path, calling "walkFn".
+func walk(fileSystem fs.FS, root string, walkFn filepath.WalkFunc) error {
+	if root != "" && root != "/" {
+		sub, err := fs.Sub(fileSystem, root)
+		if err != nil {
+			return err
+		}
+
+		fileSystem = sub
 	}
 
-	for _, name := range names {
-		fullpath := path.Join(root, name)
-		f, err := fs.Open(fullpath)
+	if root == "" {
+		root = "."
+	}
+
+	return fs.WalkDir(fileSystem, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("%s: %w", fullpath, err)
+			return fmt.Errorf("%s: %w", path, err)
 		}
-		stat, err := f.Stat()
-		err = walkFn(fullpath, stat, err)
+
+		info, err := d.Info()
 		if err != nil {
 			if err != filepath.SkipDir {
-				return fmt.Errorf("%s: %w", fullpath, err)
+				return fmt.Errorf("%s: %w", path, err)
 			}
 
+			return nil
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		return walkFn(path, info, err)
+	})
+
+}
+
+func asset(fileSystem fs.FS, name string) ([]byte, error) {
+	return fs.ReadFile(fileSystem, name)
+}
+
+type httpFS struct {
+	fs http.FileSystem
+}
+
+func (f *httpFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		name = "/"
+	}
+
+	return f.fs.Open(filepath.ToSlash(name))
+}
+
+func (f *httpFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	name = filepath.ToSlash(name)
+	if name == "." {
+		name = "/"
+	}
+
+	file, err := f.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	infos, err := file.Readdir(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]fs.DirEntry, 0, len(infos))
+	for _, info := range infos {
+		if info.IsDir() { // http file's does not return the whole tree, so read it.
+			sub, err := f.ReadDir(info.Name())
+			if err != nil {
+				return nil, err
+			}
+
+			entries = append(entries, sub...)
 			continue
 		}
 
-		if stat.IsDir() {
-			if err := walk(fs, fullpath, walkFn); err != nil {
-				return fmt.Errorf("%s: %w", fullpath, err)
-			}
-		}
+		entry := fs.FileInfoToDirEntry(info)
+		entries = append(entries, entry)
 	}
 
-	return nil
-}
-
-// assetNames returns the first-level directories and file, sorted, names.
-func assetNames(fs http.FileSystem, name string) ([]string, error) {
-	f, err := fs.Open(name)
-	if err != nil {
-		return nil, err
-	}
-
-	infos, err := f.Readdir(-1)
-	f.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	names := make([]string, 0, len(infos))
-	for _, info := range infos {
-		// note: go-bindata fs returns full names whether
-		// the http.Dir returns the base part, so
-		// we only work with their base names.
-		name := filepath.ToSlash(info.Name())
-		name = path.Base(name)
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-	return names, nil
-}
-
-func asset(fs http.FileSystem, name string) ([]byte, error) {
-	f, err := fs.Open(name)
-	if err != nil {
-		return nil, err
-	}
-
-	contents, err := ioutil.ReadAll(f)
-	f.Close()
-	return contents, err
+	return entries, nil
 }

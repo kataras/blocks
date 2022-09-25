@@ -51,11 +51,15 @@ func main() {
 	// 	fmt.Printf("[%s] with Layouts [%s]\n", name, strings.Join(layouts, ", "))
 	// }
 
-	os.MkdirAll(outputDir, 0666)
-	indexPath := filepath.Join(outputDir, "index.html")
-	indexFile, err := os.OpenFile(indexPath, os.O_CREATE, 0666)
+	err := os.MkdirAll(outputDir, 0777)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("mkdir: %v", err)
+	}
+
+	indexPath := filepath.Join(outputDir, "index.html")
+	indexFile, err := os.OpenFile(indexPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatalf("open index file: %v", err)
 	}
 
 	err = views.ExecuteTemplate(indexFile, "index", "main", siteData)

@@ -1,19 +1,23 @@
 package main
 
 import (
-	"embed"
 	"net/http"
 	"time"
 
 	"github.com/kataras/blocks"
 )
 
-//go:embed data/*
-var embeddedFS embed.FS
-
+// $ go get -u github.com/go-bindata/go-bindata
+// # OR: go get -u github.com/go-bindata/go-bindata/v3/go-bindata
+// # to save it to your go.mod file
+//
+// $ go-bindata -fs -prefix "../basic/views" ../basic/views/...
+// $ go run .
+// # OR: go-bindata -fs -prefix "../basic" ../basic/views/...
+// # with blocks.New(AssetFile()).RootDir("/views")
+//
 // System files are not used, you can optionally delete the folder and run the example now.
-var views = blocks.New(embeddedFS).
-	RootDir("data/views").
+var views = blocks.New(AssetFile()).
 	Reload(true).
 	LayoutDir("layouts").
 	Funcs(map[string]interface{}{
