@@ -87,7 +87,7 @@ type Blocks struct {
 // New("./views") or
 // New(http.Dir("./views")) or
 // New(embeddedFS) or New(AssetFile()) for embedded data.
-func New(fs interface{}) *Blocks {
+func New(fs any) *Blocks {
 	v := &Blocks{
 		fs:        getFS(fs),
 		layoutDir: "/layouts",
@@ -200,6 +200,21 @@ func (v *Blocks) Funcs(funcMap template.FuncMap) *Blocks {
 
 	v.Root.Funcs(funcMap)
 	return v
+}
+
+// AddFunc adds a function to the root template's function map.
+func (v *Blocks) AddFunc(funcName string, fn any) {
+	if v.tmplFuncs == nil {
+		v.tmplFuncs = make(template.FuncMap)
+	}
+
+	v.tmplFuncs[funcName] = fn
+	v.Root.Funcs(v.tmplFuncs)
+}
+
+// Ext returns the template file extension (with dot).
+func (v *Blocks) Ext() string {
+	return v.extension
 }
 
 // LayoutFuncs same as `Funcs` but this map's elements will be added
@@ -513,7 +528,7 @@ func (v *Blocks) load(ctx context.Context) error {
 //
 // A template may be executed safely in parallel, although if parallel
 // executions share a Writer the output may be interleaved.
-func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data interface{}) error {
+func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data any) error {
 	if v.reload {
 		if err := v.Load(); err != nil {
 			return err
@@ -527,7 +542,7 @@ func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data 
 	return v.executeTemplate(w, tmplName, layoutName, data)
 }
 
-func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data interface{}) error {
+func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data any) error {
 	if layoutName != "" {
 		tmpl := v.getTemplateWithLayout(tmplName, layoutName)
 		if tmpl == nil {
@@ -561,7 +576,7 @@ func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data 
 // ParseTemplate parses a template based on its "tmplName" name and returns the result.
 // Note that, this does not reload the templates on each call if Reload was set to true.
 // To refresh the templates you have to manually call the `Load` upfront.
-func (v *Blocks) ParseTemplate(tmplName, layoutName string, data interface{}) (string, error) {
+func (v *Blocks) ParseTemplate(tmplName, layoutName string, data any) (string, error) {
 	b := v.bufferPool.Get()
 	// use the unexported method so it does not re-reload the templates on each partial one
 	// when Reload was set to true.
@@ -572,7 +587,7 @@ func (v *Blocks) ParseTemplate(tmplName, layoutName string, data interface{}) (s
 }
 
 // PartialFunc returns the parsed result of the "partialName" template's "content" block.
-func (v *Blocks) PartialFunc(partialName string, data interface{}) (template.HTML, error) {
+func (v *Blocks) PartialFunc(partialName string, data any) (template.HTML, error) {
 	// contents, err := v.ParseTemplate(partialName, "content", data)
 	// if err != nil {
 	// 	return "", err

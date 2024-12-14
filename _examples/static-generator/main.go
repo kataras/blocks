@@ -14,7 +14,7 @@ import (
 
 const outputDir = "./public"
 
-type data = map[string]interface{}
+type data = map[string]any
 
 var defaultFuncs = data{
 	"year": func() int {
@@ -74,7 +74,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", http.FileServer(http.Dir("./public"))))
 }
 
-func readConfig(dest map[string]interface{}) error {
+func readConfig(dest map[string]any) error {
 	f, err := os.Open("./site.yml")
 	if err != nil {
 		return err

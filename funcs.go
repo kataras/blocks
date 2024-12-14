@@ -3,7 +3,7 @@ package blocks
 import "html/template"
 
 var builtins = template.FuncMap{
-	"partial": func(v *Blocks) interface{} {
+	"partial": func(v *Blocks) any {
 		return v.PartialFunc
 	},
 }
@@ -13,7 +13,7 @@ var builtins = template.FuncMap{
 // The values (functions) should be compatible
 // with a standard html/template function, however
 // as a special feature, the function input's can be a type of
-// func(*Blocks) (fn interface{}) or func(*Blocks) template.FuncMap as well,
+// func(*Blocks) (fn any) or func(*Blocks) template.FuncMap as well,
 // so it can use the current engine's methods such as `ParseTemplate`.
 // It's legal to override previous functions.
 //
@@ -53,7 +53,7 @@ func translateFuncs(v *Blocks, funcMap template.FuncMap) template.FuncMap { // u
 		}
 
 		switch f := fn.(type) {
-		case func(*Blocks) interface{}:
+		case func(*Blocks) any:
 			funcs[name] = f(v)
 		case func(*Blocks) template.FuncMap:
 			for deepName, deepFn := range translateFuncs(v, f(v)) {

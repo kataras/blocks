@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-func getFS(fsOrDir interface{}) fs.FS {
+func getFS(fsOrDir any) fs.FS {
 	switch v := fsOrDir.(type) {
 	case string:
 		return os.DirFS(v)

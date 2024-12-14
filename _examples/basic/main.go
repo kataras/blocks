@@ -9,7 +9,7 @@ import (
 
 var views = blocks.New("./views").
 	Reload(true).
-	Funcs(map[string]interface{}{
+	Funcs(map[string]any{
 		"year": func() int {
 			return time.Now().Year()
 		},
@@ -31,7 +31,7 @@ func main() {
 func index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"Title": "Page Title",
 	}
 
@@ -45,7 +45,7 @@ func internalServerError(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"Code":    http.StatusInternalServerError,
 		"Message": "Internal Server Error",
 	}

@@ -36,7 +36,7 @@ func main() {
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"Title": "Page Title",
 	}
 
@@ -45,7 +45,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 
 func admin(v *blocks.Blocks) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data := map[string]interface{}{
+		data := map[string]any{
 			"Title": "Admin Panel",
 		}
 		err := v.ExecuteTemplate(w, "index", "main", data)
