@@ -15,7 +15,6 @@ import (
 
 	"github.com/russross/blackfriday/v2"
 	"github.com/valyala/bytebufferpool"
-	"golang.org/x/exp/maps"
 )
 
 // ExtensionParser type declaration to customize other extension's parsers before passed to the template's one.
@@ -275,9 +274,9 @@ func (v *Blocks) LoadWithContext(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	maps.Clear(v.templatesContents)
-	maps.Clear(v.Templates)
-	maps.Clear(v.Layouts)
+	clearMap(v.templatesContents)
+	clearMap(v.Templates)
+	clearMap(v.Layouts)
 
 	return v.load(ctx)
 }
@@ -483,7 +482,7 @@ func (v *Blocks) load(ctx context.Context) error {
 	wg.Wait()
 
 	// Clear the cached contents, we don't need them from now on.
-	maps.Clear(v.templatesContents)
+	clearMap(v.templatesContents)
 
 	return err
 }
@@ -649,4 +648,10 @@ func (v *Blocks) getTemplateWithLayout(tmplName, layoutName string) *template.Te
 
 func makeLayoutTemplateName(tmplName, layoutName string) string {
 	return layoutName + tmplName
+}
+
+func clearMap[M ~map[K]V, K comparable, V any](m M) {
+	for k := range m {
+		delete(m, k)
+	}
 }
