@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -145,6 +146,16 @@ func (v *Blocks) Delims(left, right string) *Blocks {
 	v.Root.Delims(left, right)
 	return v
 }
+
+// This should be on and should not change, as the go parser will try to parse
+// define blocks inside comments too.
+//
+// RemoveComments sets the engine to remove all HTML comments from the templates.
+// This is useful when you want to serve the templates as HTML without comments.
+// func (v *Blocks) RemoveComments(b bool) *Blocks {
+// 	v.removeComments = b
+// 	return v
+// }
 
 // Option sets options for the templates. Options are described by
 // strings, either a simple string or "key=value". There can be at
@@ -314,6 +325,7 @@ func (v *Blocks) load(ctx context.Context) error {
 	// +---------------------+
 	// |   Template Assets   |
 	// +---------------------+
+
 	loadAsset := func(assetName string) error {
 		if dir := relDir(v.rootDir); dir != "" && !strings.HasPrefix(assetName, dir) {
 			// If contains a not empty directory and the asset name does not belong there
@@ -378,9 +390,11 @@ func (v *Blocks) load(ctx context.Context) error {
 		}
 
 		str := string(contents)
+		// Remove HTML comments.
+		str = removeComments(str)
 
-		// should have any kind of template or the whole as content template,
-		// if not we will make it as a single template definition.
+		// Check if has custom define inside (skipping any html comments).
+		// And if not, automatically inject the define content block.
 		if !strings.Contains(str, defineStart(v.left)) && !strings.Contains(str, defineStartNoSpace(v.left)) {
 			str = defineContentStart(v.left, v.right) + str + defineContentEnd(v.left, v.right)
 		}
@@ -440,6 +454,7 @@ func (v *Blocks) load(ctx context.Context) error {
 		name := trimDir(layout, v.layoutDir) // if we want rel-to-the-dir instead we just replace with v.rootDir.
 		name = strings.TrimSuffix(name, v.extension)
 		str := string(contents)
+		str = removeComments(str)
 
 		builtins := translateFuncs(v, builtins)
 		for tmplName, tmplContents := range v.templatesContents {
@@ -648,6 +663,13 @@ func (v *Blocks) getTemplateWithLayout(tmplName, layoutName string) *template.Te
 
 func makeLayoutTemplateName(tmplName, layoutName string) string {
 	return layoutName + tmplName
+}
+
+// Regular expression to match HTML comments.
+var matchHTMLCommentsRegex = regexp.MustCompile(`<!--[\s\S]*?-->`)
+
+func removeComments(str string) string {
+	return matchHTMLCommentsRegex.ReplaceAllString(str, "")
 }
 
 func clearMap[M ~map[K]V, K comparable, V any](m M) {
