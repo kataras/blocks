@@ -15,13 +15,15 @@ Blocks is a, simple, Go-idiomatic view engine based on [html/template](https://p
 
 ## Installation
 
-The only requirement is the [Go Programming Language](https://golang.org/dl).
+The only requirement is the [Go Programming Language](https://go.dev/dl).
 
 ```sh
-$ go get github.com/kataras/blocks
+$ go get github.com/kataras/blocks@latest
 ```
 
 ## Getting Started
+
+> Extensive and thorough **[documentation](DOC.md)** making it easy to get started with Blocks.
 
 Create a folder named **./views** and put some HTML template files.
 
