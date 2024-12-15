@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -124,9 +126,9 @@ type MemoryFileSystem struct {
 // It comes with no files, use `ParseTemplate` to add new virtual/memory template files.
 // Usage:
 //
-//	vfs := NewVirtualFileSystem()
-//	err := vfs.ParseTemplate("example.html", []byte("Hello, World!"), nil)
-//	templates := New(vfs)
+//	mfs := NewVirtualFileSystem()
+//	err := mfs.ParseTemplate("example.html", []byte("Hello, World!"), nil)
+//	templates := New(mfs)
 //	templates.Load()
 func NewMemoryFileSystem() *MemoryFileSystem {
 	return &MemoryFileSystem{
@@ -134,7 +136,11 @@ func NewMemoryFileSystem() *MemoryFileSystem {
 	}
 }
 
-var _ fs.FS = (*MemoryFileSystem)(nil)
+// Ensure MemoryFileSystem implements fs.FS, fs.ReadDirFS and fs.WalkDirFS interfaces.
+var (
+	_ fs.FS        = (*MemoryFileSystem)(nil)
+	_ fs.ReadDirFS = (*MemoryFileSystem)(nil)
+)
 
 // ParseTemplate adds a new memory temlate to the file system.
 func (vfs *MemoryFileSystem) ParseTemplate(name string, contents []byte, funcMap template.FuncMap) error {
@@ -147,12 +153,176 @@ func (vfs *MemoryFileSystem) ParseTemplate(name string, contents []byte, funcMap
 }
 
 // Open implements the fs.FS interface.
-func (vfs *MemoryFileSystem) Open(name string) (fs.File, error) {
-	if file, exists := vfs.files[name]; exists {
+func (mfs *MemoryFileSystem) Open(name string) (fs.File, error) {
+	if name == "." || name == "/" {
+		// Return a directory representing the root.
+		return &memoryDir{
+			fs:   mfs,
+			name: ".",
+		}, nil
+	}
+
+	if mfs.isDir(name) {
+		// Return a directory.
+		return &memoryDir{
+			fs:   mfs,
+			name: name,
+		}, nil
+	}
+
+	if file, exists := mfs.files[name]; exists {
 		file.reset() // Reset read position
 		return file, nil
 	}
+
 	return nil, fs.ErrNotExist
+}
+
+// ReadDir implements the fs.ReadDirFS interface.
+func (mfs *MemoryFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
+	var entries []fs.DirEntry
+	prefix := strings.TrimLeftFunc(name, func(r rune) bool {
+		return r == '.' || r == '/'
+	})
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	seen := make(map[string]bool)
+
+	for path := range mfs.files {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+
+		trimmedPath := strings.TrimPrefix(path, prefix)
+		parts := strings.SplitN(trimmedPath, "/", 2)
+		entryName := parts[0]
+
+		if seen[entryName] {
+			continue
+		}
+		seen[entryName] = true
+
+		fullPath := prefix + entryName
+		if mfs.isDir(fullPath) {
+			info := &memoryDirInfo{name: entryName}
+			entries = append(entries, fs.FileInfoToDirEntry(info))
+		} else {
+			file, _ := mfs.files[fullPath]
+			info := &memoryFileInfo{
+				name: entryName,
+				size: int64(len(file.contents)),
+			}
+			entries = append(entries, fs.FileInfoToDirEntry(info))
+		}
+	}
+
+	return entries, nil
+}
+
+// isDir checks if the given name is a directory in the memory file system.
+func (mfs *MemoryFileSystem) isDir(name string) bool {
+	dirPrefix := name
+	if dirPrefix != "" && !strings.HasSuffix(dirPrefix, "/") {
+		dirPrefix += "/"
+	}
+	for path := range mfs.files {
+		if strings.HasPrefix(path, dirPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+type memoryDir struct {
+	fs      *MemoryFileSystem
+	name    string
+	offset  int
+	entries []fs.DirEntry
+}
+
+// Ensure memoryDir implements fs.ReadDirFile interface.
+var _ fs.ReadDirFile = (*memoryDir)(nil)
+
+// Read implements the io.Reader interface.
+func (d *memoryDir) Read(p []byte) (int, error) {
+	return 0, io.EOF // Directories cannot be read as files.
+}
+
+// Close implements the io.Closer interface.
+func (d *memoryDir) Close() error {
+	return nil
+}
+
+// Stat implements the fs.File interface.
+func (d *memoryDir) Stat() (fs.FileInfo, error) {
+	return &memoryDirInfo{
+		name: d.name,
+	}, nil
+}
+
+// ReadDir implements the fs.ReadDirFile interface.
+func (d *memoryDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if d.entries == nil {
+		// Initialize the entries slice.
+		entries, err := d.fs.ReadDir(d.name)
+		if err != nil {
+			return nil, err
+		}
+		d.entries = entries
+	}
+
+	if d.offset >= len(d.entries) {
+		return nil, io.EOF
+	}
+
+	if n <= 0 || d.offset+n > len(d.entries) {
+		n = len(d.entries) - d.offset
+	}
+
+	entries := d.entries[d.offset : d.offset+n]
+	d.offset += n
+
+	return entries, nil
+}
+
+// memoryDirInfo provides directory information for a memory directory.
+type memoryDirInfo struct {
+	name string
+}
+
+// Ensure memoryDirInfo implements fs.FileInfo interface.
+var _ fs.FileInfo = (*memoryDirInfo)(nil)
+
+// Name returns the base name of the directory.
+func (di *memoryDirInfo) Name() string {
+	return di.name
+}
+
+// Size returns the length in bytes (zero for directories).
+func (di *memoryDirInfo) Size() int64 {
+	return 0
+}
+
+// Mode returns file mode bits.
+func (di *memoryDirInfo) Mode() fs.FileMode {
+	return fs.ModeDir | 0555 // Readable directory
+}
+
+// ModTime returns modification time.
+func (di *memoryDirInfo) ModTime() time.Time {
+	return time.Now()
+}
+
+// IsDir reports if the file is a directory.
+func (di *memoryDirInfo) IsDir() bool {
+	return true
+}
+
+// Sys returns underlying data source (can return nil).
+func (di *memoryDirInfo) Sys() interface{} {
+	return nil
 }
 
 // memoryTemplateFile represents a memory file.
@@ -166,30 +336,30 @@ type memoryTemplateFile struct {
 // Ensure memoryTemplateFile implements fs.File interface.
 var _ fs.File = (*memoryTemplateFile)(nil)
 
-func (vf *memoryTemplateFile) reset() {
-	vf.offset = 0
+func (mf *memoryTemplateFile) reset() {
+	mf.offset = 0
 }
 
 // Stat implements the fs.File interface, returning file info.
-func (vf *memoryTemplateFile) Stat() (fs.FileInfo, error) {
+func (mf *memoryTemplateFile) Stat() (fs.FileInfo, error) {
 	return &memoryFileInfo{
-		name: vf.name,
-		size: int64(len(vf.contents)),
+		name: path.Base(mf.name),
+		size: int64(len(mf.contents)),
 	}, nil
 }
 
 // Read implements the io.Reader interface.
-func (vf *memoryTemplateFile) Read(p []byte) (int, error) {
-	if vf.offset >= int64(len(vf.contents)) {
+func (mf *memoryTemplateFile) Read(p []byte) (int, error) {
+	if mf.offset >= int64(len(mf.contents)) {
 		return 0, io.EOF
 	}
-	n := copy(p, vf.contents[vf.offset:])
-	vf.offset += int64(n)
+	n := copy(p, mf.contents[mf.offset:])
+	mf.offset += int64(n)
 	return n, nil
 }
 
 // Close implements the io.Closer interface.
-func (vf *memoryTemplateFile) Close() error {
+func (mf *memoryTemplateFile) Close() error {
 	return nil
 }
 
