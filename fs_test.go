@@ -21,7 +21,7 @@ func TestMemoryFileSystem(t *testing.T) {
         </head>
         <body>
             {{ template "content" . }}
-			{{- partial "custom/user/partial" . }}
+			{{ partial "custom/user/partial" . }}
         </body>
         </html>
     `)
@@ -71,8 +71,7 @@ func TestMemoryFileSystem(t *testing.T) {
 	}
 
 	// Expected output
-	expectedOutput := `
-        <!DOCTYPE html>
+	expectedOutput := `<!DOCTYPE html>
         <html>
         <head>
             <title>Test Page</title>
@@ -80,8 +79,7 @@ func TestMemoryFileSystem(t *testing.T) {
         <body>
             Hello, World! <h3>Partial</h3>
         </body>
-        </html>
-    `
+        </html>`
 
 	// Trim whitespace for comparison
 	expected := trimContents(expectedOutput)
@@ -124,8 +122,7 @@ func TestYieldFunc(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedOutput := `
-<html>
+	expectedOutput := `<html>
 <head>
 <title>Book Layout</title>
 
@@ -134,8 +131,7 @@ func TestYieldFunc(t *testing.T) {
 	<h1>[layout] Body content is below...</h1>
 	<h1>Hello, World!</h1>
 </body>
-</html>
-`
+</html>`
 
 	// Trim whitespace for comparison
 	expected := trimContents(expectedOutput)
