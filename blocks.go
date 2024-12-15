@@ -96,7 +96,7 @@ func New(fs any) *Blocks {
 		// Root "content" for the default one, so templates without layout can still be rendered.
 		// Note that, this is parsed, the delims can be configured later on.
 		Root: template.Must(template.New("root").
-			Parse(`{{ define "root" }} {{ template "content" . }} {{ end }}`)),
+			Parse(`{{ define "root" }} {{- template "content" . -}} {{ end }}`)),
 		Templates:  make(map[string]*template.Template),
 		Layouts:    make(map[string]*template.Template),
 		reload:     false,
