@@ -546,6 +546,9 @@ func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data 
 }
 
 func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data any) error {
+	tmplName = strings.TrimSuffix(tmplName, v.extension) // trim any extension provided by mistake or by migrating from other engines.
+	layoutName = strings.TrimSuffix(layoutName, v.extension)
+
 	if layoutName != "" {
 		tmpl := v.getTemplateWithLayout(tmplName, layoutName)
 		if tmpl == nil {
