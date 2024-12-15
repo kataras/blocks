@@ -1,6 +1,7 @@
 package blocks
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html/template"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 func getFS(fsOrDir any) fs.FS {
@@ -183,6 +185,10 @@ func readFiles(ctx context.Context, fsys fs.FS, root string) (map[string][]byte,
 				return
 			default:
 			}
+
+			// trim top and bottom space.
+			data = bytes.TrimLeftFunc(data, unicode.IsSpace)
+			data = bytes.TrimRightFunc(data, unicode.IsSpace)
 
 			mu.Lock()
 			files[path] = data

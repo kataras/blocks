@@ -435,6 +435,7 @@ func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data 
 		layoutName = strings.TrimSuffix(layoutName, v.extension)
 		layoutName = strings.TrimPrefix(layoutName, v.layoutDir)
 		layoutName = strings.TrimPrefix(layoutName, "/")
+
 		tmpl := v.getTemplateWithLayout(tmplName, layoutName)
 		if tmpl == nil {
 			return ErrNotExist{layoutName}
