@@ -3,7 +3,7 @@ module static-generator
 go 1.23
 
 require (
-	github.com/kataras/blocks v0.0.9
+	github.com/kataras/blocks v0.0.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 

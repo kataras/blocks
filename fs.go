@@ -1,6 +1,7 @@
 package blocks
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -114,6 +116,103 @@ func (f *httpFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// readFiles reads all files from an fs.FS concurrently and returns a map[string][]byte.
+func readFiles(ctx context.Context, fsys fs.FS, root string) (map[string][]byte, error) {
+	if root != "" && root != "/" {
+		sub, err := fs.Sub(fsys, root)
+		if err != nil {
+			return nil, err
+		}
+
+		fsys = sub
+	}
+
+	if root == "" {
+		root = "."
+	}
+
+	files := make(map[string][]byte)
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		errChan = make(chan error, 1)
+	)
+
+	// Walk the file system
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			if err != filepath.SkipDir {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+
+			return nil
+		}
+
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			data, err := fs.ReadFile(fsys, path)
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			mu.Lock()
+			files[path] = data
+			mu.Unlock()
+		}(path)
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for all goroutines to finish
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
+
+	// Check for errors
+	select {
+	case err := <-errChan:
+		if err != nil {
+			return nil, err
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return files, nil
 }
 
 // MemoryFileSystem is a custom file system that holds virtual/memory template files in memory.
