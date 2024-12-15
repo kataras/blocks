@@ -573,10 +573,10 @@ func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data 
 	return tmpl.Execute(w, data)
 }
 
-// ParseTemplate parses a template based on its "tmplName" name and returns the result.
+// TemplateString executes a template based on its "tmplName" name and returns its contents result.
 // Note that, this does not reload the templates on each call if Reload was set to true.
 // To refresh the templates you have to manually call the `Load` upfront.
-func (v *Blocks) ParseTemplate(tmplName, layoutName string, data any) (string, error) {
+func (v *Blocks) TemplateString(tmplName, layoutName string, data any) (string, error) {
 	b := v.bufferPool.Get()
 	// use the unexported method so it does not re-reload the templates on each partial one
 	// when Reload was set to true.
@@ -592,7 +592,7 @@ func (v *Blocks) PartialFunc(partialName string, data any) (template.HTML, error
 	// if err != nil {
 	// 	return "", err
 	// }
-	contents, err := v.ParseTemplate(partialName, "", data)
+	contents, err := v.TemplateString(partialName, "", data)
 	if err != nil {
 		return "", err
 	}

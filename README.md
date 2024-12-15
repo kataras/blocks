@@ -10,6 +10,7 @@ Blocks is a, simple, Go-idiomatic view engine based on [html/template](https://p
 - Reload templates on development stage
 - Full Layouts and Blocks support
 - Automatic HTML comments removal
+- Memory File System
 - Markdown Content
 - Global [FuncMap](https://pkg.go.dev/html/template?tab=doc#FuncMap)
 
