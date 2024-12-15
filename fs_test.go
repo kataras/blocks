@@ -92,6 +92,64 @@ func TestMemoryFileSystem(t *testing.T) {
 	}
 }
 
+func TestYieldFunc(t *testing.T) {
+	// register the views, here we register them as part of the code of the shake of the example
+	// but you can use the `block.New`'s first input argument to load them from the disk.
+	mfs := blocks.NewMemoryFileSystem()
+	// define a book layout.
+	err := mfs.ParseTemplate("layouts/book.html", []byte(`
+<html>
+<head>
+<title>Book Layout</title>
+
+</head>
+<body>
+	<h1>[layout] Body content is below...</h1>
+	{{- yield . }}
+</body>
+</html>
+`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// define the book index page.
+	err = mfs.ParseTemplate("book/index.html", []byte(`<h1>Hello, {{.Name}}!</h1>`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	views := blocks.New(mfs)
+	if err := views.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedOutput := `
+<html>
+<head>
+<title>Book Layout</title>
+
+</head>
+<body>
+	<h1>[layout] Body content is below...</h1>
+	<h1>Hello, World!</h1>
+</body>
+</html>
+`
+
+	// Trim whitespace for comparison
+	expected := trimContents(expectedOutput)
+	got, err := views.TemplateString("book/index", "book", map[string]any{"Name": "World"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := trimContents(got)
+
+	if expected != result {
+		t.Errorf("Expected output does not match.\nExpected:\n%s\nGot:\n%s", expected, result)
+	}
+}
+
 func trimContents(s string) string {
 	trimLineFunc := func(r rune) bool {
 		return r == '\r' || r == '\n' || r == ' ' || r == '\t' || r == '\v' || r == '\f'

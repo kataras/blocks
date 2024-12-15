@@ -469,7 +469,10 @@ func (v *Blocks) load(ctx context.Context) error {
 		name := trimDir(layout, v.layoutDir) // if we want rel-to-the-dir instead we just replace with v.rootDir.
 		name = strings.TrimSuffix(name, v.extension)
 		str := string(contents)
+		// Strip HTML comments.
 		str = removeComments(str)
+		// Also replace any {{ yield . }} with {{ template "content" . }}.
+		str = replaceYieldWithTemplateContent(str)
 
 		builtins := translateFuncs(v, builtins)
 		for tmplName, tmplContents := range v.templatesContents {
@@ -685,6 +688,13 @@ var matchHTMLCommentsRegex = regexp.MustCompile(`<!--[\s\S]*?-->`)
 
 func removeComments(str string) string {
 	return matchHTMLCommentsRegex.ReplaceAllString(str, "")
+}
+
+var yieldMatchRegex = regexp.MustCompile(`{{-?\s*yield\s*(.*?)\s*-?}}`)
+
+// replaceYieldWithTemplateContent replaces any {{ yield . }} or similar patterns with {{ template "content" . }}.
+func replaceYieldWithTemplateContent(input string) string {
+	return yieldMatchRegex.ReplaceAllString(input, `{{ template "content" $1 }}`)
 }
 
 func clearMap[M ~map[K]V, K comparable, V any](m M) {
