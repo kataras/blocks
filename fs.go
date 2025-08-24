@@ -426,7 +426,7 @@ func (di *memoryDirInfo) IsDir() bool {
 }
 
 // Sys returns underlying data source (can return nil).
-func (di *memoryDirInfo) Sys() interface{} {
+func (di *memoryDirInfo) Sys() any {
 	return nil
 }
 
@@ -503,6 +503,6 @@ func (fi *memoryFileInfo) IsDir() bool {
 }
 
 // Sys returns underlying data source (can return nil).
-func (fi *memoryFileInfo) Sys() interface{} {
+func (fi *memoryFileInfo) Sys() any {
 	return nil
 }
