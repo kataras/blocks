@@ -1,0 +1,2 @@
+=== index | main
+<body><a href="#ZgotmplZ" title="&#34; onmouseover=&#34;alert(1)">&lt;script&gt;alert(&#39;pwned&#39;)&lt;/script&gt;</a><script>var x = "\u003cscript\u003ealert('pwned')\u003c/script\u003e";</script></body>

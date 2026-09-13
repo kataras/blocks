@@ -2,125 +2,222 @@
 
 [![build status](https://img.shields.io/github/actions/workflow/status/kataras/blocks/ci.yml?style=for-the-badge)](https://github.com/kataras/blocks/actions) [![report card](https://img.shields.io/badge/report%20card-a%2B-ff3333.svg?style=for-the-badge)](https://goreportcard.com/report/github.com/kataras/blocks) [![godocs](https://img.shields.io/badge/go-%20docs-488AC7.svg?style=for-the-badge)](https://pkg.go.dev/github.com/kataras/blocks)
 
-Blocks is a, simple, Go-idiomatic view engine based on [html/template](https://pkg.go.dev/html/template?tab=doc#Template), plus the following features:
+Blocks is a view engine for Go, built on [html/template](https://pkg.go.dev/html/template). You write a layout once, write each page as a plain file, and render any page inside any layout.
 
-- Compatible with the [fs.FS](https://pkg.go.dev/io/fs#FS), [embed.FS](https://pkg.go.dev/embed#FS) and [http.FileSystem](https://pkg.go.dev/net/http#FileSystem) interface
-- Embedded templates through [embed.FS](https://pkg.go.dev/embed#FS) or [go-bindata](https://github.com/go-bindata/go-bindata)
-- Load with optional context for cancelation
-- Reload templates on development stage
-- Full Layouts and Blocks support
-- Automatic HTML comments removal
-- Memory File System
-- Markdown Content
-- Global [FuncMap](https://pkg.go.dev/html/template?tab=doc#FuncMap)
+- Layouts, blocks and partials
+- Templates from a directory, an [embed.FS](https://pkg.go.dev/embed#FS), any [fs.FS](https://pkg.go.dev/io/fs#FS), or memory
+- Markdown pages, through [goldmark](https://github.com/yuin/goldmark)
+- Reload while you edit, safely, with requests in flight
+- Template functions per engine, per layout, or shared across every engine
+- HTML comments stripped before parsing
+- Loads under a context, for a slow file system
+
+Requires Go 1.27 or later.
 
 ## Installation
 
-The only requirement is the [Go Programming Language](https://go.dev/dl).
-
 ```sh
-$ go get github.com/kataras/blocks@latest
+go get github.com/kataras/blocks@latest
 ```
 
-## Getting Started
+## Getting started
 
-> Extensive and thorough **[documentation](DOC.md)** making it easy to get started with Blocks.
-
-Create a folder named **./views** and put some HTML template files.
+Create a **./views** directory:
 
 ```
 │   main.go
 └───views
-    |   index.html
+    │   index.html
     ├───layouts
     │       main.html
-    ├───partials
-    │       footer.html
+    └───partials
+            footer.html
 ```
 
-Now, open the **./views/layouts/main.html** file and paste the following:
+**./views/layouts/main.html** is the frame every page renders inside:
 
 ```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ if .Title }}{{ .Title }}{{ else }}Default Main Title{{ end }}</title>
+    <title>{{ if .Title }}{{ .Title }}{{ else }}Default Title{{ end }}</title>
 </head>
 <body>
     {{ template "content" . }}
 
-<footer>{{ partial "partials/footer" .}}</footer>
+    <footer>{{ partial "partials/footer" . }}</footer>
 </body>
 </html>
 ```
 
-The `template "content" .` is a Blocks builtin template function which renders the **main** content of your page that should be rendered under this layout. The block name should always be `"content"`.
+`template "content"` is where the page goes. `{{ yield . }}` is shorthand for the same thing. `partial` renders another template in place, and the dot passes the current data to it.
 
-The `partial` is a Blocks builtin template function which renders a template inside other template.
-
-The `.` (dot) passes the template's root binding data to the included templates.
-
-Continue by creating the **./views/index.html** file, copy-paste the following markup:
+**./views/index.html** is a page. It needs no wrapper:
 
 ```html
 <h1>Index Body</h1>
 ```
 
-In order to render `index` on the `main` layout, create the `./main.go` file by following the below.
-
-Import the package:
+**./main.go** loads the directory once and renders from a handler:
 
 ```go
-import "github.com/kataras/blocks"
-```
+package main
 
-The `blocks` package is fully compatible with the standard library. Use the [New(directory string)](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#New) function to return a fresh Blcoks view engine that renders templates. 
+import (
+	"log"
+	"net/http"
 
-This directory can be used to locate system template files or to select the wanted template files across a range of embedded data (or empty if templates are not prefixed with a root directory).
+	"github.com/kataras/blocks"
+)
 
-```go
-views := blocks.New("./views")
-```
+var views = blocks.New("./views")
 
-The default layouts directory is `$dir/layouts`, you can change it by `blocks.New(...).LayoutDir("otherLayouts")`.
-
-To parse files that are translated as Go code, inside the executable program itself, pass the [go-bindata's generated](https://github.com/go-bindata/go-bindata) latest version's `AssetFile` method to the `New` function:
-
-```sh
-$ go get -u github.com/go-bindata/go-bindata
-```
-
-```go
-views := blocks.New(AssetFile())
-```
-
-After the initialization and engine's customizations the user SHOULD call its [Load() error](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.Load) or [LoadWithContext(context.Context) error](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.LoadWithContext) method once in order to parse the files into templates.
-
-```go
-err := views.Load()
-```
-
-To render a template through a compatible [io.Writer](https://golang.org/pkg/io/#Writer) use the [ExecuteTemplate(w io.Writer, tmplName, layoutName string, data any)](https://pkg.go.dev/github.com/kataras/blocks?tab=doc#Blocks.ExecuteTemplate) method.
-
-```go
-func handler(w http.ResponseWriter, r *http.Request) {
-	data := map[string]any{
-		"Title": "Index Title",
+func main() {
+	if err := views.Load(); err != nil {
+		log.Fatal(err)
 	}
 
-	err := views.ExecuteTemplate(w, "index", "main", data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	http.HandleFunc("/", index)
+
+	log.Println("Listening on http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func index(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	data := map[string]any{"Title": "Index Title"}
+	if err := views.ExecuteTemplate(w, "index", "main", data); err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		log.Println(err)
 	}
 }
 ```
 
-There are several methods to customize the engine, **before `Load`**, including `Delims`, `Option`, `Funcs`, `Extension`, `RootDir`, `LayoutDir`, `LayoutFuncs`, `DefaultLayout` and `Extensions`. You can learn more about those in our [godocs](https://pkg.go.dev/github.com/kataras/blocks?tab=Blocks).
+Load parses every file. Do it once at startup, before serving. An engine is safe to use from many goroutines after that.
 
-Please navigate through [_examples](_examples) directory for more.
+Send the error text to your log, not to the browser. A parse error names the file that failed.
+
+## Embedding the templates
+
+`embed` puts the templates inside the binary, so the program has no directory to ship:
+
+```go
+import "embed"
+
+//go:embed views
+var embedded embed.FS
+
+var views = blocks.New(embedded).RootDir("views")
+```
+
+`RootDir` picks the directory inside the file system and is trimmed from every name, so the page above stays `index` rather than `views/index`. Any `fs.FS` works the same way, including what `fs.Sub` returns.
+
+## Names
+
+A template is named by its path under the root, without the extension.
+
+| File | Name |
+| --- | --- |
+| `views/index.html` | `index` |
+| `views/admin/users.html` | `admin/users` |
+| `views/layouts/main.html` | `main`, the layout |
+| `views/notes.md` | `notes.md` |
+
+The extension is optional when you render: `index` and `index.html` are the same page. A layout may be named with or without its directory, so `main`, `main.html` and `layouts/main.html` all work. Markdown keeps its extension in the name, because `notes.md` and `notes.html` are two different files.
+
+## Blocks
+
+A layout can leave a hole with a default in it, and a page can replace it:
+
+```html
+<!-- layouts/main.html -->
+<title>{{ block "title" . }}Default Title{{ end }}</title>
+```
+
+```html
+<!-- index.html -->
+{{ define "title" }}Index Title{{ end }}
+{{ define "content" }}<h1>Index Body</h1>{{ end }}
+```
+
+A page that defines nothing keeps the layout defaults. Note the shape of that second file: once a page defines anything, it has to define `content` too, because the wrapper is only added to a page that defines nothing.
+
+## Template functions
+
+```go
+views := blocks.New("./views").
+	Funcs(template.FuncMap{
+		"year": func() int { return time.Now().Year() },
+	})
+```
+
+`Funcs` covers pages and layouts. `LayoutFuncs` adds functions only layouts can call. `blocks.Register` adds functions to every engine in the program, which is how a package of shared helpers ships:
+
+```go
+package myfuncs
+
+func init() {
+	blocks.Register(template.FuncMap{"markdownify": markdownify})
+}
+```
+
+Functions are read when `Load` runs. Add them first.
+
+## Markdown
+
+A `.md` file is rendered to HTML and then parsed as a template, so a markdown page can use actions and render inside a layout. Tables, strikethrough, task lists, definition lists, bare links and raw HTML blocks all pass through.
+
+One sharp edge: the file is a template after the markdown is converted, so `{{` inside a code block is still a template action. Escape it, or call `Extensions(".md", yourParser)` with a parser of your own.
+
+## Reloading while you edit
+
+```go
+views := blocks.New("./views").Reload(true)
+```
+
+Every render reparses the directory. A reload builds a new set of templates and swaps it in, so a request already rendering finishes on the set it started with, and a file with a syntax error leaves the last working templates in place and returns the error. Turn it off in production: it reparses every file on every request.
+
+## Options
+
+All of these return the engine, and all of them come before `Load`.
+
+| Method | What it does |
+| --- | --- |
+| `RootDir(dir)` | The directory inside the file system that holds the templates |
+| `LayoutDir(dir)` | Where layouts live, `layouts` by default |
+| `DefaultLayout(name)` | The layout used when you pass an empty one |
+| `Extension(ext)` | The template extension, `.html` by default |
+| `Extensions(ext, parser)` | A parser for another extension, or nil to ignore it |
+| `Delims(left, right)` | The action delimiters, `{{` and `}}` by default |
+| `Option(opts...)` | The html/template options, such as `missingkey=error` |
+| `Funcs`, `LayoutFuncs`, `AddFunc` | Template functions |
+| `Reload(bool)` | Reparse on every render |
+
+## Templates built at runtime
+
+`MemoryFileSystem` holds templates with no files on disk, which suits generated pages and tests:
+
+```go
+mfs := blocks.NewMemoryFileSystem()
+mfs.ParseTemplate("layouts/main.html", []byte(`<main>{{ yield . }}</main>`), nil)
+mfs.ParseTemplate("index.html", []byte(`<p>{{ greet .Name }}</p>`),
+	template.FuncMap{"greet": func(s string) string { return "Hello, " + s }})
+
+views := blocks.New(mfs)
+err := views.Load()
+```
+
+The function map is optional. When you pass one, those functions are added to the engine at the next `Load`.
+
+## Examples
+
+The [_examples](_examples) directory has a runnable program for each shape: a plain directory, embedded templates, several engines in one program, shared function collections, and a static site generator.
+
+## Upgrading
+
+See [CHANGELOG.md](CHANGELOG.md). This release requires Go 1.27, replaces the `Templates` and `Layouts` fields with `Lookup` and the name iterators, and drops go-bindata support in favor of `embed`.
 
 ## License
 

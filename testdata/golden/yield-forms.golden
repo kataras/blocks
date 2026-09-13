@@ -1,0 +1,12 @@
+=== index | dot
+A
+<p>World</p>
+B
+=== index | bare
+A
+<p>World</p>
+B
+=== index | trim
+A<p>World</p>B
+=== index | template
+A<p>World</p>B

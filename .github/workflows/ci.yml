@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Nothing here writes to the repository. Without this block the token carries whatever the
+# repository default is, which for many repositories is write.
+permissions:
+  contents: read
+
 jobs:
 
   test:
@@ -14,22 +19,96 @@ jobs:
 
     strategy:
       matrix:
-        go_version: [1.26.x]
+        go_version: [1.27.x]
+
     steps:
 
+    # setup-go and checkout are on v7 for the same reason golangci-lint-action is on v9
+    # below: every earlier major runs on Node 20, which GitHub has deprecated.
     - name: Set up Go 1.x
-      uses: actions/setup-go@v6
-    - run: go version
+      uses: actions/setup-go@v7
+      with:
+        go-version: ${{ matrix.go_version }}
+
     - name: Check out code into the Go module directory
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
+    - name: Vet
+      run: go vet ./...
+
+    # -count=1 because a cached PASS from a previous run proves nothing about this one.
     - name: Test
-      run: go test -v ./...
+      run: go test -race -count=1 -v ./...
 
-    - name: Setup examples for testing
-      run: ./.github/scripts/setup_examples_test.bash
+    - name: Check formatting
+      run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
 
-    - name: Test examples
-      continue-on-error: true
-      working-directory: _examples
-      run: go test -v -mod=mod -cover -race ./...
+    # go fix carries the modernizers. An empty diff means the tree already uses the
+    # constructs this Go version prefers; a non-empty one exits non-zero and prints it.
+    - name: Check the modernizers
+      run: go fix -diff ./...
+
+    # Every directory under _examples is a program, and one of them is a separate module.
+    # A leading underscore hides a directory from the go tool's own patterns, so
+    # ./_examples/... matches nothing and each one has to be named. They went unbuilt long
+    # enough for the bindata example to stop working. Build them, never run them: each one
+    # serves HTTP and would hang the job.
+    - name: Build the examples
+      run: |
+        set -e
+        for dir in _examples/*/; do
+          if [ -f "$dir/main.go" ]; then
+            echo "== $dir"
+            if [ -f "$dir/go.mod" ]; then
+              (cd "$dir" && go build -o /dev/null . && go vet .)
+            else
+              go build -o /dev/null "./$dir" && go vet "./$dir"
+            fi
+          fi
+        done
+
+  vuln:
+    name: Vulnerabilities
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v7
+
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v7
+      with:
+        go-version: 1.27.x
+
+    # Reports only the vulnerabilities this module's own code paths can reach, so a
+    # finding here is one worth acting on rather than a dependency-graph alert.
+    - name: govulncheck
+      run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # A separate job from the tests, as golangci-lint's own documentation asks: the linter
+  # and `go test` both want the whole machine.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+
+    # Checkout comes first here, because setup-go keys its module cache off go.sum and
+    # cannot find it before the tree exists.
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v7
+
+    - name: Set up Go 1.x
+      uses: actions/setup-go@v7
+      with:
+        go-version: 1.27.x
+
+    # Both pins move together. Dependabot raises the `uses:` line on its own and does not
+    # know what the `version:` input means, so that one is the half that goes stale
+    # quietly. A pinned golangci-lint older than this module's "go" directive refuses to
+    # run at all, which is a hard job failure and not a lint difference.
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: v2.13

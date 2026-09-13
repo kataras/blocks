@@ -1,0 +1,31 @@
+=== features.md | main
+<body><h2 id="custom-id">Heading</h2>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a</td>
+<td>1</td>
+</tr>
+</tbody>
+</table>
+<p>Text with <del>strikethrough</del> and a bare link to <a href="https://go.dev">https://go.dev</a> here.</p>
+<ul>
+<li><input checked="" disabled="" type="checkbox" /> done</li>
+<li><input disabled="" type="checkbox" /> open</li>
+</ul>
+<dl>
+<dt>Term</dt>
+<dd>Definition</dd>
+</dl>
+<div class="raw">raw HTML block</div>
+<p>A line with two trailing spaces<br />
+and &ldquo;quotes&rdquo; plus an ellipsis&hellip;</p>
+<pre><code>indented code block, where 1 is still an action
+</code></pre>
+</body>

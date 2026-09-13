@@ -122,14 +122,15 @@ func TestYieldFunc(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The layout writes {{- yield . }}, so the newline and the tab before it are trimmed
+	// and the content starts on the same line as the heading.
 	expectedOutput := `<html>
 <head>
 <title>Book Layout</title>
 
 </head>
 <body>
-	<h1>[layout] Body content is below...</h1>
-	<h1>Hello, World!</h1>
+	<h1>[layout] Body content is below...</h1><h1>Hello, World!</h1>
 </body>
 </html>`
 

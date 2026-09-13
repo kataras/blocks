@@ -3,3 +3,11 @@
 /_examples/issue-*
 /_examples/feature-*
 .DS_STORE
+# AI
+.plexon
+PLEXON.md
+.claude
+CLAUDE.md
+.agents
+AGENTS.md
+.codex

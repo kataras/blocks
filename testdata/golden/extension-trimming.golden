@@ -1,0 +1,6 @@
+=== index | main
+<body><p>index</p></body>
+=== index.html | main
+<body><p>index</p></body>
+=== index.html | main.html
+<body><p>index</p></body>

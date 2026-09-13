@@ -1,0 +1,62 @@
+# golangci-lint configuration, v2 schema.
+#
+# Kept in step with the golangci-lint-action@v9 pin in .github/workflows/ci.yml. Action v7
+# and later drive golangci-lint v2 only, and the action validates this file against the
+# JSON schema of the version it installs, so a v1-schema file fails the run outright
+# rather than being ignored. Changing either pin means checking the other.
+#
+# A released golangci-lint binary embeds the standard library of the Go SDK that built it.
+# This module's "go" directive is 1.27, so the pinned version has to be built with go1.27
+# or later or the job fails before it lints anything. v2.13 is the floor.
+#
+# The bar here is "find me a bug", not "make the code look like everyone else's". A lint
+# job that reports thirty things nobody intends to act on is a job people learn to skip.
+version: "2"
+
+linters:
+  default: standard
+
+  disable:
+    # errcheck insists every returned error is handled. What it finds in this package is
+    # `defer f.Close()` on a read-only in-memory file, and `fmt.Fprintf` into a
+    # strings.Builder, neither of which has a failure a caller could act on. The errors
+    # that matter here are on Load and ExecuteTemplate, and those are covered by tests.
+    - errcheck
+
+  settings:
+    staticcheck:
+      # staticcheck ships four families and one of them finds bugs.
+      #
+      #   SA  - correctness: deprecated APIs, unreachable branches, values computed and
+      #         then discarded. This is the family worth failing a build over.
+      #   S1  - simplifications. Opinion.
+      #   ST1 - naming and comment style. Opinion.
+      #   QF1 - quickfix refactors. Opinion.
+      checks:
+        - all
+        - -S1*
+        - -ST1*
+        - -QF1*
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+    paths:
+      # _examples holds sample programs, several of them separate modules, and
+      # _examples/embedded-bindata/bindata.go is generated code nobody edits by hand.
+      # `go build ./...` already skips the underscore directory; listing it here means a
+      # run from the repository root with an explicit path cannot pull it in either. CI
+      # builds and vets the examples in their own step.
+      - _examples
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt

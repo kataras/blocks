@@ -1,52 +1,69 @@
 package blocks
 
-import "html/template"
+import (
+	"html/template"
+	"maps"
+	"sync"
+)
 
+// builtinsMu guards builtins, which any goroutine may write through Register and which
+// every Load reads.
+var builtinsMu sync.RWMutex
+
+// builtins are the functions every engine starts with. The partial entry takes the
+// snapshot being built as well as the engine, so that a partial called in the middle of a
+// render resolves against the same templates as the page around it.
 var builtins = template.FuncMap{
-	"partial": func(v *Blocks) any {
-		return v.PartialFunc
+	"partial": func(v *Blocks, s *snapshot) any {
+		return v.partialIn(s)
 	},
 }
 
-// Register register a function map
-// that will be available across all Blocks view engines.
-// The values (functions) should be compatible
-// with a standard html/template function, however
-// as a special feature, the function input's can be a type of
-// func(*Blocks) (fn any) or func(*Blocks) template.FuncMap as well,
-// so it can use the current engine's methods such as `ParseTemplate`.
-// It's legal to override previous functions.
+// Register adds functions that every engine can use, the way database/sql.Register adds a
+// driver. Call it from an init function, before the engines are created.
 //
-// It is used like the `database/sql.Register` function.
+// A value is usually a plain function, as html/template wants. Two other forms are
+// accepted, for a function that needs the engine it belongs to:
+//
+//	func(*Blocks) any              // returns the function to register
+//	func(*Blocks) template.FuncMap // returns a whole map, resolved the same way
+//
+// Overwriting a name that is already registered is allowed, including the built-in
+// partial. The functions are picked up by the next Load of each engine.
 //
 // Usage:
 //
-//		package myFuncsCollection1
-//		func init() {
-//		  blocks.Register(a_funcMap)
-//		}
+//	package myfuncs
 //
-//		package myFuncsCollection2
-//		func init() {
-//		  blocks.Register(anothrer_funcMap)
-//		}
+//	func init() {
+//		blocks.Register(template.FuncMap{"year": func() int { return time.Now().Year() }})
+//	}
 //
-//		package main
-//		import _ "myFuncsCollection1"
-//		import _ "myFuncsCollection2"
+// The program then imports that package for its side effect, and every engine has the
+// function:
 //
-//		func main() {
-//		  views := blocks.New("./views")
-//		}
-//	 Views contains the functions of both collections.
+//	import _ "myfuncs"
 func Register(funcMap template.FuncMap) {
-	for name, fn := range funcMap {
-		builtins[name] = fn
-	}
+	builtinsMu.Lock()
+	defer builtinsMu.Unlock()
+
+	maps.Copy(builtins, funcMap)
 }
 
-func translateFuncs(v *Blocks, funcMap template.FuncMap) template.FuncMap { // used on `New`.
-	funcs := make(template.FuncMap)
+// registeredFuncs returns a copy of the registered functions, taken at the start of a
+// build so that a Register call running at the same time cannot change it mid-parse.
+func registeredFuncs() template.FuncMap {
+	builtinsMu.RLock()
+	defer builtinsMu.RUnlock()
+
+	return maps.Clone(builtins)
+}
+
+// translateFuncs resolves the engine-aware forms described on Register into plain
+// functions that html/template can call.
+func translateFuncs(v *Blocks, s *snapshot, funcMap template.FuncMap) template.FuncMap {
+	funcs := make(template.FuncMap, len(funcMap))
+
 	for name, fn := range funcMap {
 		if fn == nil {
 			continue
@@ -55,14 +72,14 @@ func translateFuncs(v *Blocks, funcMap template.FuncMap) template.FuncMap { // u
 		switch f := fn.(type) {
 		case func(*Blocks) any:
 			funcs[name] = f(v)
+		case func(*Blocks, *snapshot) any:
+			funcs[name] = f(v, s)
 		case func(*Blocks) template.FuncMap:
-			for deepName, deepFn := range translateFuncs(v, f(v)) {
-				funcs[deepName] = deepFn
-			}
+			maps.Copy(funcs, translateFuncs(v, s, f(v)))
 		default:
 			funcs[name] = fn
 		}
-
 	}
+
 	return funcs
 }

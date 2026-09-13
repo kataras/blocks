@@ -1,509 +1,878 @@
 package blocks
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
+	"iter"
+	"maps"
 	"net/http"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unicode/utf8"
 
-	"github.com/russross/blackfriday/v2"
-	"github.com/valyala/bytebufferpool"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 )
 
-// ExtensionParser type declaration to customize other extension's parsers before passed to the template's one.
+// ExtensionParser converts a file's contents before they are parsed as a template. It is
+// how a file that is not HTML, such as markdown, becomes one.
 type ExtensionParser func([]byte) ([]byte, error)
 
-// ErrNotExist reports whether a template was not found in the parsed templates tree.
+// ErrNoTemplates is returned by Load when the file system holds no file the engine can
+// use, which usually means the directory or the extension is wrong.
+var ErrNoTemplates = errors.New("blocks: no template files found")
+
+// ErrNotExist reports that a template or a layout is not among the parsed ones. It
+// matches fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) is true.
 type ErrNotExist struct {
+	// Name is the template that was asked for.
 	Name string
+	// Layout is the layout that was asked for, empty when there was none.
+	Layout string
+	// IsLayout reports whether the layout is the part that is missing.
+	IsLayout bool
 }
 
-// Error implements the `error` interface.
+// Error implements the error interface.
 func (e ErrNotExist) Error() string {
-	return fmt.Sprintf("template '%s' does not exist", e.Name)
+	if e.IsLayout {
+		return fmt.Sprintf("blocks: layout '%s' does not exist", e.Layout)
+	}
+
+	if e.Layout != "" {
+		return fmt.Sprintf("blocks: template '%s' does not exist for layout '%s'", e.Name, e.Layout)
+	}
+
+	return fmt.Sprintf("blocks: template '%s' does not exist", e.Name)
 }
 
-// Blocks is the main structure which
-// holds the necessary information and options
-// to parse and render templates.
-// See `New` to initialize a new one.
-type Blocks struct {
-	// the file system to load templates from.
-	// The "rootDir" field can be used to select a specific directory from this file system.
-	fs fs.FS
+// Is reports that this error matches fs.ErrNotExist.
+func (e ErrNotExist) Is(target error) bool { return target == fs.ErrNotExist }
 
-	rootDir           string // it always set to "/" as the RootDir method changes the filesystem to sub one.
-	layoutDir         string // the default is "/layouts". Empty, means the end-developer should provide the relative to root path of the layout template.
-	layoutFuncs       template.FuncMap
-	tmplFuncs         template.FuncMap
-	defaultLayoutName string // the default layout if it's missing from the `ExecuteTemplate`.
-	extension         string // .html
-	left, right       string // delims.
-
-	// extensionHandler can handle other file extensions rathen than the main one,
-	// The default contains an entry of ".md" for `blackfriday.Run`.
-	extensionHandler map[string]ExtensionParser // key = extension with dot, value = parser.
-
-	// parse the templates on each request.
-	reload     bool
-	mu         sync.RWMutex
-	bufferPool *bytebufferpool.Pool
-
-	// Root, Templates and Layouts can be accessed after `Load`.
-	Root               *template.Template
-	Templates, Layouts map[string]*template.Template
-}
-
-// New returns a fresh Blocks engine instance.
-// It loads the templates based on the given fs FileSystem (or string).
-// To set a default layout name for an empty layout definition on `ExecuteTemplate/ParseTemplate`
-// use the `DefaultLayout` method.
+// LoadError reports that one file could not be parsed. It names the file and wraps the
+// error from html/template.
 //
-// The user can customize various options through the Blocks methods.
-// The user of this engine MUST call its `Load/LoadWithContext` method once
-// before any call of `ExecuteTemplate` and `ParseTemplate`.
-//
-// Global functions registered through `Register` package-level function
-// will be inherited from this engine. To add a function map to this engine
-// use its `Funcs` method.
-//
-// The default extension can be changed through the `Extension` method.
-// More extension parsers can be added through the `Extensions` method.
-// The left and right delimeters can be customized through its `Delims` method.
-// To reload templates on each request (useful for development stage) call its `Reload(true)` method.
-//
-// Usage:
-// New("./views") or
-// New(http.Dir("./views")) or
-// New(embeddedFS) or New(AssetFile()) for embedded data.
-func New(fs any) *Blocks {
-	v := &Blocks{
-		fs:        getFS(fs),
-		layoutDir: "/layouts",
-		extension: ".html",
-		extensionHandler: map[string]ExtensionParser{
-			".md": func(b []byte) ([]byte, error) { return blackfriday.Run(b), nil },
-		},
-		left:  "{{",
-		right: "}}",
-		// Root "content" for the default one, so templates without layout can still be rendered.
-		// Note that, this is parsed, the delims can be configured later on.
-		Root: template.Must(template.New("root").
-			Parse(`{{ define "root" }} {{- template "content" . -}} {{ end }}`)),
-		Templates:  make(map[string]*template.Template),
-		Layouts:    make(map[string]*template.Template),
-		reload:     false,
-		bufferPool: new(bytebufferpool.Pool),
-	}
-
-	v.Root.Funcs(translateFuncs(v, builtins))
-
-	return v
+// It never carries the file's contents. A caller that hands err.Error() to an HTTP
+// response would otherwise publish the template source.
+type LoadError struct {
+	// File is the name of the file that failed, as it appears in the file system.
+	File string
+	// Err is the underlying parse error.
+	Err error
 }
 
-// Reload will turn on the `Reload` setting, for development use.
-// It forces the `ExecuteTemplate` to re-parse the templates on each incoming request.
-func (v *Blocks) Reload(b bool) *Blocks {
-	v.reload = b
-	return v
+// Error implements the error interface.
+func (e *LoadError) Error() string { return fmt.Sprintf("blocks: %s: %s", e.File, e.Err) }
+
+// Unwrap returns the underlying parse error.
+func (e *LoadError) Unwrap() error { return e.Err }
+
+// FuncMapper is implemented by a file system that carries template functions of its own.
+// An engine asks for them at every Load and adds them to the function map, under anything
+// given to Funcs. MemoryFileSystem implements it, which is how the function map passed to
+// ParseTemplate reaches the templates.
+type FuncMapper interface {
+	TemplateFuncs() template.FuncMap
 }
 
-var (
-	defineStart = func(left string) string {
-		return fmt.Sprintf("%s define", left)
-	}
-	defineStartNoSpace = func(left string) string {
-		return fmt.Sprintf("%sdefine", left)
-	}
-	defineContentStart = func(left, right string) string {
-		return fmt.Sprintf(`%sdefine "content"%s`, left, right)
-	}
-	defineContentEnd = func(left, right string) string {
-		return fmt.Sprintf("%send%s", left, right)
-	}
-)
+// config is everything a Load reads. It is copied under cfgMu at the start of a build, so
+// a setter called from another goroutine cannot change a build halfway through.
+type config struct {
+	fsys fs.FS
 
-// Delims sets the action delimiters to the specified strings, to be used in
-// Load. Nested template
-// definitions will inherit the settings. An empty delimiter stands for the
-// corresponding default: {{ or }}.
-// The return value is the engine, so calls can be chained.
-func (v *Blocks) Delims(left, right string) *Blocks {
-	v.left = left
-	v.right = right
-	v.Root.Delims(left, right)
-	return v
+	layoutDir         string // "layouts" by default, trimmed from layout names.
+	defaultLayoutName string // used when ExecuteTemplate is given an empty layout.
+	extension         string // ".html" by default.
+	left, right       string // the action delimiters.
+
+	options     []string
+	tmplFuncs   template.FuncMap
+	layoutFuncs template.FuncMap
+
+	// extensionHandler maps a file extension, with its dot, to the parser that converts
+	// such a file before it is parsed as a template.
+	extensionHandler map[string]ExtensionParser
+
+	// funcMapper is the file system given to New, kept when it carries functions. It is
+	// captured there because RootDir wraps the file system in fs.Sub, which hides the
+	// concrete type this interface lives on.
+	funcMapper FuncMapper
 }
 
-// This should be on and should not change, as the go parser will try to parse
-// define blocks inside comments too.
+// fsFuncs returns the functions the file system carries, if any.
+func (c config) fsFuncs() template.FuncMap {
+	if c.funcMapper == nil {
+		return nil
+	}
+	return c.funcMapper.TemplateFuncs()
+}
+
+// clone copies the configuration deeply enough that a build is unaffected by a later
+// setter call.
+func (c config) clone() config {
+	c.options = slices.Clone(c.options)
+	c.tmplFuncs = maps.Clone(c.tmplFuncs)
+	c.layoutFuncs = maps.Clone(c.layoutFuncs)
+	c.extensionHandler = maps.Clone(c.extensionHandler)
+	return c
+}
+
+// patterns are the regular expressions that read a file, built from one engine
+// delimiters so that Delims changes what they match.
+type patterns struct {
+	define *regexp.Regexp
+	layout *regexp.Regexp
+	yield  *regexp.Regexp
+
+	left, right string
+}
+
+// patternCache keeps one patterns value per pair of delimiters. Compiling three
+// expressions on every Load is wasted work in reload mode, where Load runs per request,
+// and almost every program uses one pair for the life of the process.
+var patternCache sync.Map // map[string]patterns, keyed by left + 0x00 + right.
+
+// patternsFor returns the cached patterns for a pair of delimiters, compiling them the
+// first time they are seen.
+func patternsFor(left, right string) patterns {
+	key := left + string(rune(0)) + right
+	if cached, ok := patternCache.Load(key); ok {
+		return cached.(patterns)
+	}
+
+	pat := newPatterns(left, right)
+	patternCache.Store(key, pat)
+	return pat
+}
+
+// newPatterns compiles the three expressions for a pair of delimiters. The delimiters are
+// quoted, so a delimiter made of regular expression metacharacters, such as "[[", is
+// matched literally.
+func newPatterns(left, right string) patterns {
+	l, r := regexp.QuoteMeta(left), regexp.QuoteMeta(right)
+
+	return patterns{
+		// A define action, with or without a trim marker. A file that has one already
+		// says where its content block is, so nothing is wrapped around it.
+		define: regexp.MustCompile(l + `-?\s*define\b`),
+		// What makes a file a layout: somewhere to put a content template. The word
+		// boundary keeps a function named yielding from turning a page into a layout.
+		layout: regexp.MustCompile(l + `-?\s*(?:template\s*"content"|yield\b)`),
+		// A yield action, capturing its trim markers and its argument.
+		yield: regexp.MustCompile(l + `(-?)\s*yield\b\s*(.*?)\s*(-?)` + r),
+		left:  left,
+		right: right,
+	}
+}
+
+// replaceYield rewrites each yield into the template action it is shorthand for, keeping
+// the trim markers that were written around it.
 //
-// RemoveComments sets the engine to remove all HTML comments from the templates.
-// This is useful when you want to serve the templates as HTML without comments.
-// func (v *Blocks) RemoveComments(b bool) *Blocks {
-// 	v.removeComments = b
-// 	return v
-// }
+// A yield with no argument passes the dot, so the content template sees the same data as
+// the layout around it.
+func (p patterns) replaceYield(input string) string {
+	return p.yield.ReplaceAllStringFunc(input, func(match string) string {
+		groups := p.yield.FindStringSubmatch(match)
+		leftTrim, argument, rightTrim := groups[1], groups[2], groups[3]
 
-// Option sets options for the templates. Options are described by
-// strings, either a simple string or "key=value". There can be at
-// most one equals sign in an option string. If the option string
-// is unrecognized or otherwise invalid, Option panics.
-//
-// Known options:
-//
-// missingkey: Control the behavior during execution if a map is
-// indexed with a key that is not present in the map.
-//
-//	"missingkey=default" or "missingkey=invalid"
-//		The default behavior: Do nothing and continue execution.
-//		If printed, the result of the index operation is the string
-//		"<no value>".
-//	"missingkey=zero"
-//		The operation returns the zero value for the map type's element.
-//	"missingkey=error"
-//		Execution stops immediately with an error.
-func (v *Blocks) Option(opt ...string) *Blocks {
-	v.Root.Option(opt...)
-	return v
-}
-
-// Funcs adds the elements of the argument map to the root template's function map.
-// It must be called before the engine is loaded.
-// It panics if a value in the map is not a function with appropriate return
-// type. However, it is legal to overwrite elements of the map. The return
-// value is the engine, so calls can be chained.
-//
-// The default function map contains a single element of "partial" which
-// can be used to render templates directly.
-func (v *Blocks) Funcs(funcMap template.FuncMap) *Blocks {
-	if v.tmplFuncs == nil {
-		v.tmplFuncs = funcMap
-		return v
-	}
-
-	for name, fn := range funcMap {
-		v.tmplFuncs[name] = fn
-	}
-
-	v.Root.Funcs(funcMap)
-	return v
-}
-
-// AddFunc adds a function to the root template's function map.
-func (v *Blocks) AddFunc(funcName string, fn any) {
-	if v.tmplFuncs == nil {
-		v.tmplFuncs = make(template.FuncMap)
-	}
-
-	v.tmplFuncs[funcName] = fn
-	v.Root.Funcs(v.tmplFuncs)
-}
-
-// Ext returns the template file extension (with dot).
-func (v *Blocks) Ext() string {
-	return v.extension
-}
-
-// LayoutFuncs same as `Funcs` but this map's elements will be added
-// only to the layout templates. It's legal to override elements of the root `Funcs`.
-func (v *Blocks) LayoutFuncs(funcMap template.FuncMap) *Blocks {
-	if v.layoutFuncs == nil {
-		v.layoutFuncs = funcMap
-		return v
-	}
-
-	for name, fn := range funcMap {
-		v.layoutFuncs[name] = fn
-	}
-
-	return v
-}
-
-// RootDir sets the directory to use as the root one inside the provided File System.
-func (v *Blocks) RootDir(root string) *Blocks {
-	if v.fs != nil && root != "" && root != "/" && root != "." {
-		sub, err := fs.Sub(v.fs, root)
-		if err != nil {
-			panic(err)
+		if argument == "" {
+			argument = "."
 		}
 
-		v.fs = sub
+		return p.left + leftTrim + ` template "content" ` + argument + ` ` + rightTrim + p.right
+	})
+}
+
+// wrapContent puts a content define around a file that does not have one.
+func (p patterns) wrapContent(text string) string {
+	if p.define.MatchString(text) {
+		return text
 	}
 
-	// v.rootDir = filepath.ToSlash(root)
-	// v.layoutDir = path.Join(root, v.layoutDir)
+	return p.left + `define "content"` + p.right + text + p.left + "end" + p.right
+}
+
+// layoutKey identifies one content template rendered inside one layout. It is a struct
+// rather than the two names concatenated, because concatenating them made layout "ab"
+// with template "c" collide with layout "a" with template "bc".
+type layoutKey struct {
+	layout string
+	name   string
+}
+
+// snapshot is one finished parse. It is never modified after it is published, so readers
+// take no lock: they load the pointer once and use that snapshot for the whole render,
+// even while a reload is replacing it.
+type snapshot struct {
+	templates map[string]*template.Template
+	layouts   map[layoutKey]*template.Template
+
+	names       []string // sorted template names.
+	layoutNames []string // sorted layout names.
+
+	extension string // the name normalization this snapshot was built with.
+	layoutDir string
+}
+
+// Blocks parses a set of template files and renders them, on their own or inside a
+// layout. Create one with New, configure it, then call Load once before rendering.
+//
+// A Blocks is safe for concurrent use once loaded, and Reload(true) stays safe: a reload
+// builds a new set of templates and swaps it in, so a render already in flight keeps the
+// set it started with.
+type Blocks struct {
+	// cfgMu guards cfg. It is held briefly, by the setters and by the start of a build.
+	cfgMu sync.Mutex
+	cfg   config
+
+	// loadMu serializes builds. loadCount and lastErr are guarded by it.
+	loadMu    sync.Mutex
+	loadCount uint64
+	lastErr   error
+
+	// loadCountAtomic mirrors loadCount for a reader that has not taken loadMu yet, which
+	// is how a burst of reload-mode requests collapses into one build.
+	loadCountAtomic atomic.Uint64
+
+	reload atomic.Bool
+	snap   atomic.Pointer[snapshot]
+
+	// bufferPool holds *bytes.Buffer for TemplateString, and so for every partial.
+	bufferPool sync.Pool
+}
+
+// New returns an engine that loads templates from fsOrDir, which may be:
+//
+//   - a directory name, such as "./views"
+//   - an fs.FS, including an embed.FS and anything fs.Sub returns
+//   - a *MemoryFileSystem, for templates built at runtime
+//
+// Embedding is the usual choice for a program that ships as a single binary:
+//
+//	//go:embed views
+//	var embedded embed.FS
+//
+//	views := blocks.New(embedded).RootDir("views")
+//
+// The engine is configured through its methods, which return the engine so calls can be
+// chained, and which must be called before Load. Load parses the files, and nothing
+// renders until it has run.
+//
+// Functions registered with the package level Register are inherited by every engine. Use
+// Funcs for functions this engine alone should have.
+//
+// It panics if fsOrDir is none of the types above.
+func New(fsOrDir any) *Blocks {
+	funcMapper, _ := fsOrDir.(FuncMapper)
+
+	return &Blocks{
+		cfg: config{
+			fsys:       getFS(fsOrDir),
+			funcMapper: funcMapper,
+			layoutDir:  "layouts",
+			extension:  ".html",
+			left:       "{{",
+			right:      "}}",
+			extensionHandler: map[string]ExtensionParser{
+				".md": newMarkdownParser(),
+			},
+		},
+	}
+}
+
+// newMarkdownParser returns the parser registered for ".md" files.
+//
+// The options line up with what a template author expects of a markdown file:
+//
+//   - GFM adds tables, strikethrough, task lists and bare link detection.
+//   - Definition lists and the typographer (curly quotes, ellipses) match what this
+//     package rendered before goldmark.
+//   - WithAttribute allows a heading identifier, written as {#id}.
+//   - WithUnsafe keeps raw HTML in the output. Without it goldmark replaces a block of
+//     HTML with a comment, and the comment stripper then deletes it, so the markup
+//     disappears with nothing said.
+//   - WithXHTML closes void elements, so a line break is <br /> as it was before.
+//
+// Template actions inside a markdown file are rendered after the markdown is converted.
+// A code block holding {{ and }} is still read as an action, which is worth knowing
+// before documenting this package in its own templates.
+func newMarkdownParser() ExtensionParser {
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.GFM, extension.DefinitionList, extension.Typographer),
+		goldmark.WithParserOptions(parser.WithAttribute()),
+		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe(), goldmarkhtml.WithXHTML()),
+	)
+
+	return func(contents []byte) ([]byte, error) {
+		var buf bytes.Buffer
+		if err := md.Convert(contents, &buf); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+}
+
+// rootDefinition is the template every content template is parsed into. It gives a
+// template without a layout something to execute: the "content" block on its own.
+const rootDefinition = `{{ define "root" }} {{- template "content" . -}} {{ end }}`
+
+// Reload makes ExecuteTemplate reparse the templates on every call, which is what you
+// want while editing them and not in production. A failed reparse keeps the templates
+// that already work and returns the error.
+func (v *Blocks) Reload(b bool) *Blocks {
+	v.reload.Store(b)
 	return v
 }
 
-// LayoutDir sets a custom layouts directory,
-// always relative to the "rootDir" one.
-// This can be used to trim the layout directory from the template's name,
-// for example: layouts/main -> main on ExecuteTemplate's "layoutName" argument.
-// Defaults to "layouts".
-func (v *Blocks) LayoutDir(relToDirLayoutDir string) *Blocks {
-	v.layoutDir = filepath.ToSlash(relToDirLayoutDir)
+// Delims sets the action delimiters, which default to "{{" and "}}". An empty delimiter
+// keeps its default. Layout detection follows the delimiters, so a layout written with
+// custom ones is still recognized.
+//
+// It panics if a delimiter is not valid UTF-8. The delimiters become part of the
+// expressions that read each file, and an expression cannot hold an invalid rune.
+func (v *Blocks) Delims(left, right string) *Blocks {
+	if !utf8.ValidString(left) || !utf8.ValidString(right) {
+		panic(fmt.Errorf("blocks: Delims: %q and %q: a delimiter must be valid UTF-8", left, right))
+	}
+
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	if left != "" {
+		v.cfg.left = left
+	}
+	if right != "" {
+		v.cfg.right = right
+	}
 	return v
 }
 
-// DefaultLayout sets the "layoutName" to be used
-// when the `ExecuteTemplate`'s one is empty.
-func (v *Blocks) DefaultLayout(layoutName string) *Blocks {
-	v.defaultLayoutName = layoutName
+// Option sets options for the templates, each a plain string or "key=value". The options
+// reach every template, layouts included.
+//
+// The one option html/template defines is missingkey, which says what happens when a map
+// is indexed with a key it does not hold:
+//
+//	"missingkey=default" or "missingkey=invalid"
+//		Do nothing and continue. A printed value becomes "<no value>".
+//	"missingkey=zero"
+//		Use the zero value for the map's element type.
+//	"missingkey=error"
+//		Stop execution with an error.
+//
+// It panics if an option string is not recognized.
+func (v *Blocks) Option(opt ...string) *Blocks {
+	// Validated here rather than at Load, so a typo panics at the call that made it, the
+	// way the html/template Option does.
+	template.New("blocks.option.check").Option(opt...)
+
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	v.cfg.options = append(v.cfg.options, opt...)
 	return v
 }
 
-// Extension sets the template file extension (with dot).
-// Defaults to ".html".
+// Funcs adds functions that every template can call, layouts included. The map is copied,
+// so the caller may keep using it. Overwriting a name that is already there is allowed.
+//
+// The functions take effect at the next Load: templates that are already parsed keep the
+// functions they were parsed with.
+//
+// It panics if a value is not a function with a return type html/template accepts.
+func (v *Blocks) Funcs(funcMap template.FuncMap) *Blocks {
+	if len(funcMap) == 0 {
+		return v
+	}
+	validateFuncMapOrPanic(funcMap)
+
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	if v.cfg.tmplFuncs == nil {
+		v.cfg.tmplFuncs = make(template.FuncMap, len(funcMap))
+	}
+	maps.Copy(v.cfg.tmplFuncs, funcMap)
+	return v
+}
+
+// AddFunc adds one function, the way Funcs adds a map. It takes effect at the next Load.
+func (v *Blocks) AddFunc(funcName string, fn any) {
+	v.Funcs(template.FuncMap{funcName: fn})
+}
+
+// LayoutFuncs adds functions that only layouts can call. The map is copied.
+//
+// A name added here can be overridden by Funcs, which is applied after it.
+//
+// It panics if a value is not a function with a return type html/template accepts.
+func (v *Blocks) LayoutFuncs(funcMap template.FuncMap) *Blocks {
+	if len(funcMap) == 0 {
+		return v
+	}
+	validateFuncMapOrPanic(funcMap)
+
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	if v.cfg.layoutFuncs == nil {
+		v.cfg.layoutFuncs = make(template.FuncMap, len(funcMap))
+	}
+	maps.Copy(v.cfg.layoutFuncs, funcMap)
+	return v
+}
+
+// validateFuncMapOrPanic keeps Funcs and LayoutFuncs panicking on a bad value the way
+// html/template does, instead of failing much later inside Load.
+func validateFuncMapOrPanic(funcMap template.FuncMap) {
+	template.New("blocks.funcs.check").Funcs(funcMap)
+}
+
+// Ext returns the template file extension, with its dot.
+func (v *Blocks) Ext() string {
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	return v.cfg.extension
+}
+
+// Extension sets the template file extension, with its dot. It defaults to ".html".
 func (v *Blocks) Extension(ext string) *Blocks {
-	v.extension = ext
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	v.cfg.extension = ext
 	return v
 }
 
-// Extensions registers a parser that will be called right before
-// a file's contents parsed as a template.
-// The "ext" should start with dot (.), e.g. ".md".
-// The "parser" is a function which accepts the original file's contents
-// and should return the parsed ones, e.g. return markdown.Run(contents), nil.
+// Extensions registers a parser that runs on a file's contents before they are parsed as
+// a template. The extension starts with a dot, such as ".md".
 //
-// The default underline map contains a single element of ".md": markdown.Run,
-// which is responsible to convert markdown files to html right before its contents
-// are given to the template's parser.
-//
-// To override an extension handler pass a nil "parser".
+// One entry is registered by default, ".md", which renders markdown to HTML. Pass a nil
+// parser to drop an extension, after which files carrying it are ignored unless it is the
+// engine's own extension.
 func (v *Blocks) Extensions(ext string, parser ExtensionParser) *Blocks {
-	v.extensionHandler[ext] = parser
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	if v.cfg.extensionHandler == nil {
+		v.cfg.extensionHandler = make(map[string]ExtensionParser, 1)
+	}
+	v.cfg.extensionHandler[ext] = parser
 	return v
 }
 
-// Load parses the templates, including layouts,
-// through the html/template standard package into the Blocks engine.
+// RootDir sets the directory inside the file system that holds the templates. Everything
+// outside it is ignored, and template names are relative to it.
+//
+// The directory is a slash separated path. A leading slash, a leading "./" and a trailing
+// slash are all accepted, so "views", "/views", "./views" and "views/" name the same
+// directory. An empty value, "/" or "." means the whole file system.
+//
+// It panics if the path cannot name a directory, such as one that climbs out of the file
+// system with "..".
+func (v *Blocks) RootDir(root string) *Blocks {
+	root = path.Clean(strings.Trim(filepath.ToSlash(root), "/"))
+
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	if v.cfg.fsys == nil || root == "" || root == "." {
+		return v
+	}
+
+	sub, err := fs.Sub(v.cfg.fsys, root)
+	if err != nil {
+		panic(fmt.Errorf("blocks: RootDir: %w", err))
+	}
+
+	v.cfg.fsys = sub
+	return v
+}
+
+// LayoutDir sets the directory that holds the layouts, relative to the root one. It
+// defaults to "layouts".
+//
+// The directory is trimmed from a layout's name, so the file "layouts/main.html" is the
+// layout "main". Naming it in full works too.
+func (v *Blocks) LayoutDir(relToDirLayoutDir string) *Blocks {
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	v.cfg.layoutDir = strings.Trim(filepath.ToSlash(relToDirLayoutDir), "/")
+	return v
+}
+
+// DefaultLayout sets the layout ExecuteTemplate uses when it is given an empty one.
+func (v *Blocks) DefaultLayout(layoutName string) *Blocks {
+	v.cfgMu.Lock()
+	defer v.cfgMu.Unlock()
+
+	v.cfg.defaultLayoutName = layoutName
+	return v
+}
+
+// Load parses the templates, including the layouts, into the engine. Call it once after
+// configuring the engine and before rendering anything.
+//
+// If it fails, the templates from the previous successful Load keep working.
 func (v *Blocks) Load() error {
 	return v.LoadWithContext(context.Background())
 }
 
-// LoadWithContext accepts a context that can be used for load cancelation, deadline/timeout.
-// It parses the templates, including layouts,
-// through the html/template standard package into the Blocks engine.
+// LoadWithContext is Load with a context, for a file system slow enough to be worth
+// cancelling: a network mount, or a very large directory.
 func (v *Blocks) LoadWithContext(ctx context.Context) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.loadMu.Lock()
+	defer v.loadMu.Unlock()
 
-	clearMap(v.Templates)
-	clearMap(v.Layouts)
-
-	return v.load(ctx)
+	return v.buildLocked(ctx)
 }
 
-func (v *Blocks) load(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+// buildLocked runs one build and records its result. Callers hold loadMu.
+func (v *Blocks) buildLocked(ctx context.Context) error {
+	err := v.build(ctx)
 
-	filesMap, err := readFiles(ctx, v.fs, v.rootDir)
+	v.lastErr = err
+	v.loadCount++
+	v.loadCountAtomic.Store(v.loadCount)
+	return err
+}
+
+// reloadOnce rebuilds for Reload mode, collapsing a burst of concurrent requests into one
+// build: a request that waited for loadMu while another request rebuilt takes that
+// build's result rather than parsing everything a second time.
+func (v *Blocks) reloadOnce() error {
+	arrived := v.loadCountAtomic.Load()
+
+	v.loadMu.Lock()
+	defer v.loadMu.Unlock()
+
+	if v.loadCount != arrived {
+		return v.lastErr
+	}
+
+	return v.buildLocked(context.Background())
+}
+
+// build parses everything and, if that succeeds, publishes the result.
+func (v *Blocks) build(ctx context.Context) error {
+	v.cfgMu.Lock()
+	cfg := v.cfg.clone()
+	v.cfgMu.Unlock()
+
+	files, err := readFiles(ctx, cfg.fsys)
 	if err != nil {
 		return err
 	}
 
-	if len(filesMap) == 0 {
-		return fmt.Errorf("no template files found")
+	contents, layouts, err := classify(cfg, files)
+	if err != nil {
+		return err
 	}
 
-	// templatesContents is used to keep the contents of each content template in order
-	// to be parsed on each layout, so all content templates have all layouts available,
-	// and all layouts can inject all content templates.
-	contentTemplates := make(map[string]string)
-	// layoutTemplates is used to keep the contents of each layout template.
-	layoutTemplates := make(map[string]string)
-
-	// collect all content and layout template contents.
-	for filename, data := range filesMap {
-		ext := path.Ext(filename)
-		if extParser := v.extensionHandler[ext]; extParser != nil {
-			data, err = extParser(data) // let the parser modify the contents.
-			if err != nil {
-				// custom parsers may return a non-nil error,
-				// e.g. less or scss files
-				// and, yes, they can be used as templates too,
-				// because they are wrapped by a template block if necessary.
-				return err
-			}
-		} else if ext != v.extension {
-			continue // extension not match with the given template extension and the extension handler is nil.
-		}
-
-		contents := string(data)
-		// Remove HTML comments.
-		contents = removeComments(contents)
-
-		tmplName := trimDir(filename, v.rootDir)
-		tmplName = strings.TrimPrefix(tmplName, "/")
-		tmplName = strings.TrimSuffix(tmplName, v.extension)
-
-		if isLayoutTemplate(contents) {
-			// Replace any {{ yield . }} with {{ template "content" . }}.
-			contents = replaceYieldWithTemplateContent(contents)
-			// Remove any given layout dir.
-			tmplName = trimDir(tmplName, v.layoutDir)
-			layoutTemplates[tmplName] = contents
-			continue
-		}
-
-		// Inject the define content block.
-		if !strings.Contains(contents, defineStart(v.left)) && !strings.Contains(contents, defineStartNoSpace(v.left)) {
-			contents = defineContentStart(v.left, v.right) + contents + defineContentEnd(v.left, v.right)
-		}
-
-		contentTemplates[tmplName] = contents
+	if len(contents) == 0 && len(layouts) == 0 {
+		return ErrNoTemplates
 	}
 
-	// Load the content templates first.
-	for tmplName, contents := range contentTemplates {
-		tmpl, err := v.Root.Clone()
+	s := &snapshot{
+		templates: make(map[string]*template.Template, len(contents)),
+		layouts:   make(map[layoutKey]*template.Template, len(layouts)*len(contents)),
+		extension: cfg.extension,
+		layoutDir: cfg.layoutDir,
+	}
+
+	// The functions are resolved now rather than at New, so a Register call made after
+	// New reaches content templates and layouts alike.
+	//
+	// Precedence, weakest first: the registered functions, then any the file system
+	// carries, then LayoutFuncs for layouts only, then Funcs and AddFunc.
+	contentFuncs := translateFuncs(v, s, registeredFuncs())
+	maps.Copy(contentFuncs, cfg.fsFuncs())
+
+	layoutFuncs := maps.Clone(contentFuncs)
+	maps.Copy(layoutFuncs, cfg.layoutFuncs)
+	maps.Copy(layoutFuncs, cfg.tmplFuncs)
+	maps.Copy(contentFuncs, cfg.tmplFuncs)
+
+	root := template.New("root").Delims(cfg.left, cfg.right).Option(cfg.options...).Funcs(contentFuncs)
+	if _, err = root.Parse(rootDefinition); err != nil {
+		return err
+	}
+
+	for name, file := range contents {
+		tmpl, err := root.Clone()
 		if err != nil {
 			return err
 		}
 
-		_, err = tmpl.Funcs(v.tmplFuncs).Parse(contents)
-		if err != nil {
-			return fmt.Errorf("%w: %s: %s", err, tmplName, contents)
+		if _, err = tmpl.Parse(file.contents); err != nil {
+			return &LoadError{File: file.path, Err: err}
 		}
 
-		v.Templates[tmplName] = tmpl
+		s.templates[name] = tmpl
 	}
 
-	// Load the layout templates.
-	layoutBuiltinFuncs := translateFuncs(v, builtins)
-	for tmplName, contents := range layoutTemplates {
-		for contentTmplName, contentTmplContents := range contentTemplates {
-			// Make new layout template for each of the content templates,
-			// the key of the layout in map will be the layoutName+tmplName.
-			// So each template owns all layouts. This fixes the issue with the new {{ block }} and the usual {{ define }} directives.
-			layoutTmpl, err := template.New(tmplName).Funcs(layoutBuiltinFuncs).Funcs(v.layoutFuncs).Parse(contents)
+	for layoutName, layoutFile := range layouts {
+		// The layout is parsed once. This template is never executed, only cloned, which
+		// is what lets one copy per content template cost a clone instead of a parse.
+		base := template.New(layoutName).Delims(cfg.left, cfg.right).Option(cfg.options...).Funcs(layoutFuncs)
+		if _, err = base.Parse(layoutFile.contents); err != nil {
+			return &LoadError{File: layoutFile.path, Err: err}
+		}
+
+		for name, file := range contents {
+			tmpl, err := base.Clone()
 			if err != nil {
-				return fmt.Errorf("%w: for layout: %s", err, tmplName)
+				return err
 			}
 
-			_, err = layoutTmpl.Funcs(v.tmplFuncs).Parse(contentTmplContents)
-			if err != nil {
-				return fmt.Errorf("%w: layout: %s: for template: %s", err, tmplName, contentTmplName)
+			if _, err = tmpl.Parse(file.contents); err != nil {
+				return &LoadError{File: file.path, Err: err}
 			}
 
-			key := makeLayoutTemplateName(contentTmplName, tmplName)
-			v.Layouts[key] = layoutTmpl
+			s.layouts[layoutKey{layout: layoutName, name: name}] = tmpl
 		}
 	}
 
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+
+	s.names = slices.Sorted(maps.Keys(s.templates))
+	s.layoutNames = slices.Sorted(maps.Keys(layouts))
+
+	v.snap.Store(s)
 	return nil
 }
 
-// ExecuteTemplate applies the template associated with "tmplName"
-// to the specified "data" object and writes the output to "w".
-// If an error occurs executing the template or writing its output,
-// execution stops, but partial results may already have been written to
-// the output writer.
+// templateFile is one file's contents together with the path it came from, which is what
+// an error names.
+type templateFile struct {
+	path     string
+	contents string
+}
+
+// classify decides which files are layouts and which are content, and prepares the
+// contents of each for parsing.
+func classify(cfg config, files map[string][]byte) (contents, layouts map[string]templateFile, err error) {
+	contents = make(map[string]templateFile, len(files))
+	layouts = make(map[string]templateFile)
+	pat := patternsFor(cfg.left, cfg.right)
+
+	for filename, data := range files {
+		ext := path.Ext(filename)
+		if parser, ok := cfg.extensionHandler[ext]; ok && parser != nil {
+			if data, err = parser(data); err != nil {
+				return nil, nil, &LoadError{File: filename, Err: err}
+			}
+		} else if ext != cfg.extension {
+			continue // not a template, and nothing knows how to convert it.
+		}
+
+		text := removeComments(string(data))
+
+		name := strings.TrimPrefix(filename, "/")
+		name = strings.TrimSuffix(name, cfg.extension)
+
+		if pat.layout.MatchString(text) {
+			text = pat.replaceYield(text)
+			layouts[trimDir(name, cfg.layoutDir)] = templateFile{path: filename, contents: text}
+			continue
+		}
+
+		contents[name] = templateFile{path: filename, contents: pat.wrapContent(text)}
+	}
+
+	return contents, layouts, nil
+}
+
+// ExecuteTemplate renders the template named tmplName into w, inside the layout named
+// layoutName, with data as the template's dot.
 //
-// If "layoutName" and "v.defaultLayoutName" are both empty then
-// the template is executed without a layout.
+// An empty layoutName falls back to the one given to DefaultLayout, and when that is
+// empty too the template renders on its own. Either name may be given with or without the
+// file extension, and a layout may be named with or without its directory.
 //
-// A template may be executed safely in parallel, although if parallel
-// executions share a Writer the output may be interleaved.
+// The error is an ErrNotExist when a name matches nothing loaded. Output may already have
+// been written to w when an execution error comes back.
+//
+// It is safe to call from many goroutines. If they share a w, their output interleaves.
 func (v *Blocks) ExecuteTemplate(w io.Writer, tmplName, layoutName string, data any) error {
-	if v.reload {
-		if err := v.Load(); err != nil {
+	if v.reload.Load() {
+		if err := v.reloadOnce(); err != nil {
 			return err
 		}
 	}
 
-	if layoutName == "" {
-		layoutName = v.defaultLayoutName
+	s := v.snap.Load()
+	if s == nil {
+		return ErrNotExist{Name: tmplName, Layout: layoutName}
 	}
 
-	return v.executeTemplate(w, tmplName, layoutName, data)
+	if layoutName == "" {
+		v.cfgMu.Lock()
+		layoutName = v.cfg.defaultLayoutName
+		v.cfgMu.Unlock()
+	}
+
+	return v.executeIn(s, w, tmplName, layoutName, data)
 }
 
-func (v *Blocks) executeTemplate(w io.Writer, tmplName, layoutName string, data any) error {
-	tmplName = strings.TrimSuffix(tmplName, v.extension) // trim any extension provided by mistake or by migrating from other engines.
+// executeIn renders inside one snapshot. A render, and every partial it calls, stays on
+// the snapshot it started with.
+func (v *Blocks) executeIn(s *snapshot, w io.Writer, tmplName, layoutName string, data any) error {
+	name := s.templateName(tmplName)
 
 	if layoutName != "" {
-		layoutName = strings.TrimSuffix(layoutName, v.extension)
-		layoutName = strings.TrimPrefix(layoutName, v.layoutDir)
-		layoutName = strings.TrimPrefix(layoutName, "/")
+		layout := s.layoutName(layoutName)
 
-		tmpl := v.getTemplateWithLayout(tmplName, layoutName)
-		if tmpl == nil {
-			return ErrNotExist{layoutName}
+		tmpl, ok := s.layouts[layoutKey{layout: layout, name: name}]
+		if !ok {
+			if !slices.Contains(s.layoutNames, layout) {
+				return ErrNotExist{Name: name, Layout: layout, IsLayout: true}
+			}
+			return ErrNotExist{Name: name, Layout: layout}
 		}
 
 		return tmpl.Execute(w, data)
 	}
 
-	tmpl, ok := v.Templates[tmplName]
+	tmpl, ok := s.templates[name]
 	if !ok {
-		return ErrNotExist{tmplName}
+		return ErrNotExist{Name: name}
 	}
 
-	// if httpResponseWriter, ok := w.(http.ResponseWriter); ok {
-	// check if content-type exists, and if it's not:
-	// 	httpResponseWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// }  ^ No, leave it for the caller.
-
-	// if layoutName != "" {
-	// 	return tmpl.ExecuteTemplate(w, layoutName, data)
-	// }
 	return tmpl.Execute(w, data)
 }
 
-// TemplateString executes a template based on its "tmplName" name and returns its contents result.
-// Note that, this does not reload the templates on each call if Reload was set to true.
-// To refresh the templates you have to manually call the `Load` upfront.
+// templateName trims the extension a caller may have included.
+func (s *snapshot) templateName(name string) string {
+	return strings.TrimSuffix(name, s.extension)
+}
+
+// layoutName trims the extension and the layout directory, so "layouts/main.html",
+// "layouts/main" and "main" all name the same layout.
+func (s *snapshot) layoutName(name string) string {
+	name = strings.TrimSuffix(name, s.extension)
+	name = trimDir(name, s.layoutDir)
+	return strings.TrimPrefix(name, "/")
+}
+
+// TemplateString renders a template and returns the result, the way ExecuteTemplate
+// renders it into a writer.
+//
+// It does not reload in Reload mode. Call Load first when the files may have changed.
 func (v *Blocks) TemplateString(tmplName, layoutName string, data any) (string, error) {
-	b := v.bufferPool.Get()
-	// use the unexported method so it does not re-reload the templates on each partial one
-	// when Reload was set to true.
-	err := v.executeTemplate(b, tmplName, layoutName, data)
-	contents := b.String()
-	v.bufferPool.Put(b)
+	s := v.snap.Load()
+	if s == nil {
+		return "", ErrNotExist{Name: tmplName, Layout: layoutName}
+	}
+
+	return v.templateStringIn(s, tmplName, layoutName, data)
+}
+
+func (v *Blocks) templateStringIn(s *snapshot, tmplName, layoutName string, data any) (string, error) {
+	buf, _ := v.bufferPool.Get().(*bytes.Buffer)
+	if buf == nil {
+		buf = new(bytes.Buffer)
+	}
+	buf.Reset()
+
+	err := v.executeIn(s, buf, tmplName, layoutName, data)
+	contents := buf.String()
+	v.bufferPool.Put(buf)
 	return contents, err
 }
 
-// PartialFunc returns the parsed result of the "partialName" template's "content" block.
+// PartialFunc renders a template's content block and returns it as HTML, which is what
+// the partial template function calls.
 func (v *Blocks) PartialFunc(partialName string, data any) (template.HTML, error) {
-	// contents, err := v.ParseTemplate(partialName, "content", data)
-	// if err != nil {
-	// 	return "", err
-	// }
-	contents, err := v.TemplateString(partialName, "", data)
-	if err != nil {
-		return "", err
+	s := v.snap.Load()
+	if s == nil {
+		return "", ErrNotExist{Name: partialName}
 	}
-	return template.HTML(contents), nil
+
+	return v.partialIn(s)(partialName, data)
 }
 
-// ContextKeyType is the type which `Set`
-// request's context value is using to store
-// the current Blocks engine.
+// partialIn returns the partial function bound to one snapshot, so a partial rendered in
+// the middle of a page uses the same templates as the page around it even when a reload
+// lands between the two.
+func (v *Blocks) partialIn(s *snapshot) func(string, any) (template.HTML, error) {
+	return func(partialName string, data any) (template.HTML, error) {
+		contents, err := v.templateStringIn(s, partialName, "", data)
+		if err != nil {
+			return "", err
+		}
+		return template.HTML(contents), nil
+	}
+}
+
+// Lookup returns the parsed template for a name, or nil when there is none. Give an empty
+// layoutName for the template on its own. Names are normalized the way ExecuteTemplate
+// normalizes them.
 //
-//	See `Set` and `Get`.
+// The returned template is the live one. Read it and execute it, but do not reparse or
+// reconfigure it: it is shared with every other render, and the next Load replaces it.
+func (v *Blocks) Lookup(tmplName, layoutName string) *template.Template {
+	s := v.snap.Load()
+	if s == nil {
+		return nil
+	}
+
+	name := s.templateName(tmplName)
+	if layoutName == "" {
+		return s.templates[name]
+	}
+
+	return s.layouts[layoutKey{layout: s.layoutName(layoutName), name: name}]
+}
+
+// TemplateNames iterates the loaded template names in order.
+func (v *Blocks) TemplateNames() iter.Seq[string] {
+	s := v.snap.Load()
+	if s == nil {
+		return slices.Values([]string(nil))
+	}
+	return slices.Values(s.names)
+}
+
+// LayoutNames iterates the loaded layout names in order.
+func (v *Blocks) LayoutNames() iter.Seq[string] {
+	s := v.snap.Load()
+	if s == nil {
+		return slices.Values([]string(nil))
+	}
+	return slices.Values(s.layoutNames)
+}
+
+// ContextKeyType is the type of the request context value that carries an engine.
+//
+// See Set and Get.
 type ContextKeyType struct{}
 
-// ContextKey is the request's context value for a blocks engine.
+// ContextKey is the request context key an engine is stored under.
 //
-//	See `Set` and `Get`.
+// See Set and Get.
 var ContextKey ContextKeyType
 
-// Set returns a handler wrapper which sets the current
-// view engine to this "v" Blocks.
-// Useful when the caller needs multiple Blocks engine instances per group of routes.
-// Note that this is entirely optional, the caller could just wrap a function of func(v *Blocks)
-// and return a handler which will directly use it.
-// See `Get` too.
+// Set returns middleware that puts this engine in the request's context, for a program
+// that serves different groups of routes from different engines.
+//
+// See Get.
 func Set(v *Blocks) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -513,87 +882,27 @@ func Set(v *Blocks) func(http.Handler) http.Handler {
 	}
 }
 
-// Get retrieves the associated Blocks view engine retrieved from the request's context.
-// See `Set` too.
+// Get returns the engine Set put in the request's context, or nil when there is none.
 func Get(r *http.Request) *Blocks {
-	value := r.Context().Value(ContextKey)
-	if value == nil {
-		return nil
-	}
-
-	v, ok := value.(*Blocks)
-	if !ok {
-		return nil
-	}
-
+	v, _ := r.Context().Value(ContextKey).(*Blocks)
 	return v
 }
 
-func withSuffix(s string, suf string) string {
-	if len(s) == 0 {
-		return ""
-	}
-
-	if !strings.HasSuffix(s, suf) {
-		s += suf
-	}
-
-	return s
-}
-
-func relDir(dir string) string {
-	if dir == "." {
-		return ""
-	}
-
-	if dir == "" || dir == "/" {
-		return ""
-	}
-
-	return strings.TrimPrefix(strings.TrimPrefix(dir, "."), "/")
-}
-
+// trimDir removes a leading directory from a template name.
 func trimDir(s string, dir string) string {
-	if dir == "" {
+	dir = strings.Trim(dir, "/")
+	if dir == "" || dir == "." {
 		return s
 	}
-	dir = withSuffix(relDir(dir), "/")
-	return strings.TrimPrefix(s, dir)
+
+	return strings.TrimPrefix(s, dir+"/")
 }
 
-func (v *Blocks) getTemplateWithLayout(tmplName, layoutName string) *template.Template {
-	key := makeLayoutTemplateName(tmplName, layoutName)
-	return v.Layouts[key]
-}
-
-func makeLayoutTemplateName(tmplName, layoutName string) string {
-	return layoutName + tmplName
-}
-
-// Regular expression to match HTML comments.
+// matchHTMLCommentsRegex matches an HTML comment, including one that spans lines.
 var matchHTMLCommentsRegex = regexp.MustCompile(`<!--[\s\S]*?-->`)
 
+// removeComments strips HTML comments before parsing. It has to happen: the template
+// parser reads a define inside a comment as a real one.
 func removeComments(str string) string {
 	return matchHTMLCommentsRegex.ReplaceAllString(str, "")
-}
-
-var yieldMatchRegex = regexp.MustCompile(`{{-?\s*yield\s*(.*?)\s*-?}}`)
-
-// replaceYieldWithTemplateContent replaces any {{ yield . }} or similar patterns with {{ template "content" . }}.
-func replaceYieldWithTemplateContent(input string) string {
-	return yieldMatchRegex.ReplaceAllString(input, `{{ template "content" $1 }}`)
-}
-
-// Regex pattern to match various forms of {{ template "content" ... }} and {{ yield ... }}
-var layoutPatternRegex = regexp.MustCompile(`{{-?\s*(template\s*"content"\s*[^}]*|yield\s*[^}]*)\s*-?}}`)
-
-// isLayoutTemplate checks if the template contents indicate it is a layout template.
-func isLayoutTemplate(contents string) bool {
-	return layoutPatternRegex.MatchString(contents)
-}
-
-func clearMap[M ~map[K]V, K comparable, V any](m M) {
-	for k := range m {
-		delete(m, k)
-	}
 }

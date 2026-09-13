@@ -1,0 +1,4 @@
+=== index | 
+ERROR: template: root:1:34: executing "content" at <.Missing>: map has no entry for key "Missing"
+=== index | main
+ERROR: template: main:1:34: executing "content" at <.Missing>: map has no entry for key "Missing"

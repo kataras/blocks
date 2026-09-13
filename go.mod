@@ -1,8 +1,5 @@
 module github.com/kataras/blocks
 
-go 1.26
+go 1.27
 
-require (
-	github.com/russross/blackfriday/v2 v2.1.0
-	github.com/valyala/bytebufferpool v1.0.0
-)
+require github.com/yuin/goldmark v1.8.6
